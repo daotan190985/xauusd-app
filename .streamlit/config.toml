@@ -1,0 +1,17 @@
+# Cấu hình Streamlit — theme tối + tối ưu mobile
+# .streamlit/config.toml
+
+[theme]
+base = "dark"
+primaryColor = "#B8860B"
+backgroundColor = "#131722"
+secondaryBackgroundColor = "#1e222d"
+textColor = "#e8e8e8"
+
+[server]
+# Để mặc định CORS/XSRF -> không còn cảnh báo xung đột.
+# Khi deploy cloud nền tảng tự xử lý; chạy local không cần tắt.
+maxUploadSize = 20
+
+[browser]
+gatherUsageStats = false
