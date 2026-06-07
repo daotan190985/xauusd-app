@@ -15,6 +15,14 @@ from datetime import datetime, time as dtime
 import pandas as pd
 import streamlit as st
 
+# Auto-refresh: dùng streamlit-autorefresh nếu có (mượt, không reload cả trang)
+try:
+    from streamlit_autorefresh import st_autorefresh
+    _HAS_AUTOREFRESH = True
+except ImportError:  # fallback nếu chưa cài thư viện
+    _HAS_AUTOREFRESH = False
+
+
 from core.analyzer import (
     IndicatorParams,
     aggregate_signals,
@@ -371,7 +379,7 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
     # Biểu đồ khung lớn có đánh dấu vùng
     with st.expander("📈 Xem biểu đồ khung lớn + vùng đảo chiều", expanded=False):
         opt = ChartOptions.from_selection(["EMA 200", "EMA 1200", "MACD"])
-        fig = build_full_chart(df_big, title=f"XAU/USD — {zone_tf} + vùng đảo chiều",
+        fig = build_full_chart(df_big, title=f"{st.session_state.get('cur_symbol','XAU/USD')} — {zone_tf} + vùng đảo chiều",
                                options=opt, height=560)
         if fig:
             add_reversal_zones(fig, zinfo)
@@ -394,6 +402,7 @@ def render_tab_analyzer() -> None:
         sym = SYMBOLS[symbol_label]
         ticker = sym["primary"]
         fb = sym["fallback"]
+        st.session_state["cur_symbol"] = symbol_label
         st.caption(f"Ticker: {ticker} (fallback: {sym['fallback']})")
         selected_tfs = st.multiselect(
             "Khung thời gian", TIMEFRAMES, default=["15m", "60m", "1d"]
@@ -403,26 +412,49 @@ def render_tab_analyzer() -> None:
 
         st.divider()
         st.subheader("🔄 Tự động làm mới")
-        auto_refresh = st.toggle("Bật auto-refresh (15 phút)", value=False,
+        auto_refresh = st.toggle("Bật auto-refresh", value=False,
                                  key="auto_refresh")
-        if st.button("↻ Làm mới ngay (xóa cache giá)", use_container_width=True):
+        # Slider chọn khoảng thời gian: 10s - 300s, mặc định 60s
+        refresh_sec = st.slider(
+            "Khoảng thời gian (giây)", min_value=10, max_value=300,
+            value=60, step=5, key="refresh_sec",
+        )
+
+        refresh_count = 0
+        if auto_refresh:
+            if _HAS_AUTOREFRESH:
+                # st_autorefresh chỉ rerun script, GIỮ NGUYÊN session_state
+                # (khung đang chọn, indicator đang bật...) -> không mất trạng thái
+                refresh_count = st_autorefresh(
+                    interval=refresh_sec * 1000, key="data_autorefresh",
+                )
+            else:
+                # Fallback: meta refresh (kém mượt hơn, có cài lại trang)
+                st.markdown(
+                    f'<meta http-equiv="refresh" content="{refresh_sec}">',
+                    unsafe_allow_html=True,
+                )
+            # Mỗi lần auto-refresh -> xóa cache giá để lấy dữ liệu mới
+            clear_processed_cache()
+            st.caption(f"⏱️ Tự làm mới mỗi {refresh_sec}s "
+                       f"· đã refresh {refresh_count} lần")
+
+        if st.button("↻ Làm mới dữ liệu NGAY", use_container_width=True,
+                     type="primary"):
             clear_raw_cache()
             clear_processed_cache()
             st.session_state.pop("analysis_results", None)
             st.rerun()
-        if auto_refresh:
-            # Tự reload trang sau 900 giây (15 phút) bằng meta refresh
-            st.markdown(
-                '<meta http-equiv="refresh" content="900">',
-                unsafe_allow_html=True,
-            )
-            st.caption("⏱️ Trang sẽ tự làm mới sau mỗi 15 phút.")
 
     if not analyze_btn and "analysis_results" not in st.session_state:
         st.info("Chọn khung thời gian ở thanh bên rồi bấm **Phân tích ngay**.")
         return
 
-    if analyze_btn:
+    # Phân tích lại khi: bấm nút HOẶC auto-refresh đang bật & đã phân tích trước đó
+    should_analyze = analyze_btn or (
+        auto_refresh and "analysis_results" in st.session_state
+    )
+    if should_analyze:
         if not selected_tfs:
             st.warning("Vui lòng chọn ít nhất một khung thời gian.")
             return
@@ -437,6 +469,8 @@ def render_tab_analyzer() -> None:
             prog.progress((i + 1) / len(selected_tfs), text=f"Xong {tf}")
         prog.empty()
         st.session_state["analysis_results"] = results
+        import datetime as _dt
+        st.session_state["last_update"] = _dt.datetime.now().strftime("%H:%M:%S")
 
     results = st.session_state.get("analysis_results", {})
     if not results:
@@ -451,6 +485,12 @@ def render_tab_analyzer() -> None:
         f"&nbsp;|&nbsp; Confluence: {agg['confluence_score']}</div>",
         unsafe_allow_html=True,
     )
+    # Trạng thái cập nhật
+    lu = st.session_state.get("last_update", "—")
+    status = f"🕒 Cập nhật cuối: **{lu}**"
+    if auto_refresh:
+        status += f" &nbsp;·&nbsp; 🔄 Auto-refresh {refresh_sec}s (đã {refresh_count} lần)"
+    st.caption(status)
 
     cols = st.columns(len(results))
     for col, (tf, (res, _)) in zip(cols, results.items()):
@@ -488,7 +528,7 @@ def render_tab_analyzer() -> None:
                         for reason in res.reasons:
                             st.write("•", reason)
                 with c2:
-                    fig = build_full_chart(df, title=f"XAU/USD — {tf}", options=opt)
+                    fig = build_full_chart(df, title=f"{st.session_state.get('cur_symbol','XAU/USD')} — {tf}", options=opt)
                     if fig:
                         st.plotly_chart(fig, use_container_width=True,
                                         config=PLOTLY_CONFIG)
@@ -525,7 +565,7 @@ def render_tab_analyzer() -> None:
                     f"<b style='color:{color}'>{pane_tf} — {res.direction} "
                     f"({res.score} điểm)</b>", unsafe_allow_html=True)
                 fig = build_full_chart(
-                    df, title=f"XAU/USD — {pane_tf}", options=opt, height=pane_h)
+                    df, title=f"{st.session_state.get('cur_symbol','XAU/USD')} — {pane_tf}", options=opt, height=pane_h)
                 if fig:
                     if show_fib:
                         add_fibonacci(fig, df)
@@ -591,7 +631,7 @@ def render_tab_journal() -> None:
                 else:
                     fig = build_full_chart(
                         hist_df,
-                        title=f"XAU/USD — {interval} @ {chart_ts:%d/%m %H:%M}",
+                        title=f"{st.session_state.get('cur_symbol','XAU/USD')} — {interval} @ {chart_ts:%d/%m %H:%M}",
                         options=opt_j,
                     )
                     st.session_state["journal_hist_fig"] = fig
