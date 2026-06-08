@@ -51,7 +51,11 @@ from core.data import (
     get_data_until,
     get_processed_data,
 )
+<<<<<<< HEAD
 from core.realtime import apply_live_price, get_realtime_price
+=======
+from core.realtime import get_realtime_price
+>>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
 from core.journal import (
     ENTRY_METHODS,
     compute_stats,
@@ -399,6 +403,7 @@ def _safe_secret(key: str) -> str:
         return ""
 
 
+<<<<<<< HEAD
 def _fresh_df(ticker, tf, period, pkey, fb, live_price=None):
     """
     Lấy DataFrame đã có chỉ báo. NẾU có giá tươi (live_price), vá vào cây nến
@@ -415,6 +420,8 @@ def _fresh_df(ticker, tf, period, pkey, fb, live_price=None):
     return add_indicators(patched, params)
 
 
+=======
+>>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
 def render_tab_analyzer() -> None:
     st.header("📊 Phân tích Tín hiệu Đa khung")
 
@@ -508,6 +515,7 @@ def render_tab_analyzer() -> None:
         st.info("Chọn khung thời gian ở thanh bên rồi bấm **Phân tích ngay**.")
         return
 
+<<<<<<< HEAD
     # ===== LẤY GIÁ TƯƠI SỚM (trước phân tích) để vá vào dữ liệu =====
     live_price = None
     live_info = None
@@ -517,6 +525,8 @@ def render_tab_analyzer() -> None:
         if live_info and "price" in live_info:
             live_price = live_info["price"]
 
+=======
+>>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
     # Phân tích lại khi: bấm nút HOẶC auto-refresh đang bật & đã phân tích trước đó
     should_analyze = analyze_btn or (
         auto_refresh and "analysis_results" in st.session_state
@@ -568,21 +578,37 @@ def render_tab_analyzer() -> None:
         status += f" &nbsp;·&nbsp; 🔄 Auto-refresh {refresh_sec}s (đã {refresh_count} lần)"
     st.caption(status)
 
+<<<<<<< HEAD
     # ===== GIÁ TƯƠI REAL-TIME (đã lấy sớm + đã vá vào phân tích) =====
     if data_source != "yfinance":
         rt = live_info
         if rt and "price" in rt:
+=======
+    # ===== GIÁ TƯƠI REAL-TIME (nếu chọn nguồn ngoài yfinance) =====
+    if data_source != "yfinance":
+        rt = get_realtime_price(symbol_label, data_source,
+                                twelvedata_key=td_key, goldapi_key=gold_key)
+        if rt:
+>>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
             extra = ""
             if rt.get("bid") and rt.get("ask"):
                 extra = f" &nbsp;|&nbsp; Bid {rt['bid']} / Ask {rt['ask']}"
             st.success(
                 f"📡 **Giá tươi {rt['symbol']}: {rt['price']}** "
+<<<<<<< HEAD
                 f"(nguồn: {rt['source']}){extra} &nbsp;✅ đã dùng cho phân tích"
             )
         elif rt and "error" in rt:
             st.warning(f"📡 {rt['error']} — phân tích đang dùng dữ liệu yfinance.")
         else:
             st.warning("📡 Chưa lấy được giá tươi — phân tích đang dùng yfinance.")
+=======
+                f"(nguồn: {rt['source']}){extra}"
+            )
+        else:
+            st.warning("📡 Chưa lấy được giá tươi (thiếu/sai API key hoặc hết quota) "
+                       "— đang dùng dữ liệu yfinance.")
+>>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
 
     cols = st.columns(len(results))
     for col, (tf, (res, _)) in zip(cols, results.items()):
