@@ -207,6 +207,28 @@ def build_full_chart(
         ),
         row=1, col=1,
     )
+    # ---- ĐƯỜNG GIÁ HIỆN TẠI (giá cây nến cuối) — dễ nhìn, nổi bật ----
+    last_close = float(df["Close"].iloc[-1])
+    last_open = float(df["Open"].iloc[-1])
+    # màu theo nến tăng/giảm
+    price_color = C_UP if last_close >= last_open else C_DOWN
+    # số chữ số thập phân hợp lý theo độ lớn giá (vàng/btc khác forex)
+    if last_close >= 1000:
+        price_txt = f"{last_close:,.2f}"
+    elif last_close >= 10:
+        price_txt = f"{last_close:.3f}"
+    else:
+        price_txt = f"{last_close:.5f}"
+    fig.add_hline(
+        y=last_close,
+        line=dict(color=price_color, width=1.2, dash="dot"),
+        annotation_text=f"  ● {price_txt}  ",
+        annotation_position="right",
+        annotation_font=dict(size=14, color="#ffffff"),
+        annotation_bgcolor=price_color,
+        row=1, col=1,
+    )
+
     ema_map = [
         (opt.ema100, "EMA_100", opt.col_ema100, "EMA 100"),
         (opt.ema200, "EMA_200", opt.col_ema200, "EMA 200"),
@@ -356,6 +378,18 @@ def build_full_chart(
                          zeroline=False, row=i, col=1)
         fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
                          row=i, col=1)
+
+    # Trục THỜI GIAN dễ nhìn: chỉ hiện ở hàng dưới cùng, định dạng giờ:phút,
+    # bỏ khoảng trống cuối tuần (rangebreaks) để nến liền mạch.
+    fig.update_xaxes(
+        showticklabels=False, row=1, col=1,  # ẩn nhãn ở hàng giá cho gọn
+    )
+    fig.update_xaxes(
+        tickformat="%H:%M\n%d/%m",   # giờ:phút xuống dòng ngày/tháng
+        tickfont=dict(size=11, color="#c9d1d9"),
+        nticks=8,                     # vừa đủ mốc, không chen chúc
+        row=n_rows, col=1,            # chỉ hàng cuối hiện nhãn thời gian
+    )
 
     # Scale trục giá: kiểu (linear/log) + Auto/Lock
     if opt.scale == "log":

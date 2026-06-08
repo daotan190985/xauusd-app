@@ -51,6 +51,7 @@ from core.data import (
     get_data_until,
     get_processed_data,
 )
+from core.realtime import apply_live_price, get_realtime_price
 from core.journal import (
     ENTRY_METHODS,
     compute_stats,
@@ -212,7 +213,8 @@ def indicator_controls(key_prefix: str, colors: Optional[dict] = None) -> ChartO
 # ============================================================================
 # TAB 1 — PHÂN TÍCH TÍN HIỆU
 # ============================================================================
-def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
+def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
+                             live_price=None) -> None:
     """
     Hiển thị VÙNG ĐẢO CHIỀU (Fib 161.8 + EMA 200/1200) trên khung lớn,
     và khi giá chạm vùng thì kiểm tra HỘI TỤ M1 (%BB + Stoch + MACD tách histogram).
@@ -224,10 +226,10 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
     st.markdown("##### 🏆 ĐIỂM VÀO 3 TẦNG (khung lớn + trung + M1)")
     frames3 = {}
     for tf in ["4h", "60m", "30m", "15m", "5m"]:
-        d = get_processed_data(ticker, tf, DEFAULT_PERIOD.get(tf), pkey, fallback=fb)
+        d = _fresh_df(ticker, tf, DEFAULT_PERIOD.get(tf), pkey, fb, live_price)
         if not d.empty:
             frames3[tf] = d
-    df_m1_3 = get_processed_data(ticker, "1m", DEFAULT_PERIOD.get("1m"), pkey, fallback=fb)
+    df_m1_3 = _fresh_df(ticker, "1m", DEFAULT_PERIOD.get("1m"), pkey, fb, live_price)
     tt = three_tier_entry(frames3, df_m1_3)
 
     # 3 ô trạng thái từng tầng
@@ -275,8 +277,8 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
             help="EMA1200 của khung này là điểm đảo chiều để vào M1. "
                  "Khung càng lớn, điểm đảo càng mạnh.",
         )
-    df_scalp = get_processed_data(ticker, scalp_tf, DEFAULT_PERIOD.get(scalp_tf), pkey, fallback=fb)
-    df_m1 = get_processed_data(ticker, "1m", DEFAULT_PERIOD.get("1m"), pkey, fallback=fb)
+    df_scalp = _fresh_df(ticker, scalp_tf, DEFAULT_PERIOD.get(scalp_tf), pkey, fb, live_price)
+    df_m1 = _fresh_df(ticker, "1m", DEFAULT_PERIOD.get("1m"), pkey, fb, live_price)
     scalp = ema1200_scalp_signal(df_scalp, df_m1)
 
     if scalp["stage"] == "confirm":
@@ -304,7 +306,7 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
     st.markdown("##### 🌀 Phát hiện sóng hồi (đa khung band confluence)")
     frames = {}
     for tf in ["4h", "60m", "15m", "5m"]:
-        d = get_processed_data(ticker, tf, DEFAULT_PERIOD.get(tf), pkey, fallback=fb)
+        d = _fresh_df(ticker, tf, DEFAULT_PERIOD.get(tf), pkey, fb, live_price)
         if not d.empty:
             frames[tf] = d
     pb = detect_pullback_zone(frames, df_m1)
@@ -337,7 +339,7 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
             "Khung lớn xác định vùng (Fib 161.8 + EMA động)",
             ["60m", "4h", "1d"], index=0, key="zone_tf",
         )
-    df_big = get_processed_data(ticker, zone_tf, DEFAULT_PERIOD.get(zone_tf), pkey, fallback=fb)
+    df_big = _fresh_df(ticker, zone_tf, DEFAULT_PERIOD.get(zone_tf), pkey, fb, live_price)
     if df_big.empty:
         st.warning("Không tải được dữ liệu khung lớn.")
         return
@@ -359,7 +361,7 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
     # Khi giá đang chạm vùng -> kiểm tra M1
     if zinfo["in_zone"]:
         st.warning(f"⚠️ {zinfo['note']}")
-        df_m1 = get_processed_data(ticker, "1m", DEFAULT_PERIOD.get("1m"), pkey, fallback=fb)
+        df_m1 = _fresh_df(ticker, "1m", DEFAULT_PERIOD.get("1m"), pkey, fb, live_price)
         m1 = m1_confluence_check(df_m1)
         if m1["ready"]:
             color = "#089981" if m1["direction"] == "MUA" else "#F23645"
@@ -386,6 +388,33 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None) -> None:
             st.plotly_chart(fig, use_container_width=True, config=PLOTLY_CONFIG)
 
 
+def _safe_secret(key: str) -> str:
+    """
+    Đọc st.secrets[key] AN TOÀN. Nếu không có file secrets.toml (chạy local
+    không cấu hình), st.secrets sẽ ném lỗi -> bọc try/except trả về rỗng.
+    """
+    try:
+        return st.secrets.get(key, "")
+    except Exception:
+        return ""
+
+
+def _fresh_df(ticker, tf, period, pkey, fb, live_price=None):
+    """
+    Lấy DataFrame đã có chỉ báo. NẾU có giá tươi (live_price), vá vào cây nến
+    cuối rồi TÍNH LẠI chỉ báo -> phân tích phản ánh đúng giá hiện tại.
+    Đây là chìa khoá để tín hiệu không bị trễ theo yfinance.
+    """
+    from core.analyzer import IndicatorParams, add_indicators
+    df = get_processed_data(ticker, tf, period, pkey, fallback=fb)
+    if df is None or df.empty or not live_price:
+        return df
+    # Vá giá tươi vào nến cuối + tính lại chỉ báo trên dữ liệu đã vá
+    patched = apply_live_price(df[["Open", "High", "Low", "Close", "Volume"]], live_price)
+    params = IndicatorParams(*pkey) if pkey else None
+    return add_indicators(patched, params)
+
+
 def render_tab_analyzer() -> None:
     st.header("📊 Phân tích Tín hiệu Đa khung")
 
@@ -409,6 +438,35 @@ def render_tab_analyzer() -> None:
         )
         analyze_btn = st.button("🚀 Phân tích ngay", type="primary",
                                 use_container_width=True)
+
+        # ===== NGUỒN DỮ LIỆU REAL-TIME =====
+        st.divider()
+        st.subheader("📡 Nguồn dữ liệu")
+        data_source = st.radio(
+            "Chọn nguồn giá tươi",
+            ["yfinance", "twelvedata", "goldapi"],
+            format_func=lambda s: {
+                "yfinance": "yfinance (free, trễ ~15 phút)",
+                "twelvedata": "Twelve Data (real-time, cần key)",
+                "goldapi": "GoldAPI (real-time XAU, cần key)",
+            }[s],
+            key="data_source",
+        )
+        td_key = gold_key = ""
+        if data_source == "twelvedata":
+            td_key = st.text_input(
+                "Twelve Data API key", type="password",
+                value=_safe_secret("TWELVEDATA_KEY"),
+                help="Đăng ký free tại twelvedata.com (800 lệnh/ngày)",
+                key="td_key",
+            )
+        elif data_source == "goldapi":
+            gold_key = st.text_input(
+                "GoldAPI API key", type="password",
+                value=_safe_secret("GOLDAPI_KEY"),
+                help="Đăng ký free tại goldapi.io",
+                key="gold_key",
+            )
 
         st.divider()
         st.subheader("🔄 Tự động làm mới")
@@ -450,6 +508,15 @@ def render_tab_analyzer() -> None:
         st.info("Chọn khung thời gian ở thanh bên rồi bấm **Phân tích ngay**.")
         return
 
+    # ===== LẤY GIÁ TƯƠI SỚM (trước phân tích) để vá vào dữ liệu =====
+    live_price = None
+    live_info = None
+    if data_source != "yfinance":
+        live_info = get_realtime_price(symbol_label, data_source,
+                                       twelvedata_key=td_key, goldapi_key=gold_key)
+        if live_info and "price" in live_info:
+            live_price = live_info["price"]
+
     # Phân tích lại khi: bấm nút HOẶC auto-refresh đang bật & đã phân tích trước đó
     should_analyze = analyze_btn or (
         auto_refresh and "analysis_results" in st.session_state
@@ -461,8 +528,8 @@ def render_tab_analyzer() -> None:
         results = {}
         prog = st.progress(0.0, text="Đang tải & phân tích...")
         for i, tf in enumerate(selected_tfs):
-            df = get_processed_data(ticker, tf, DEFAULT_PERIOD.get(tf), pkey, fallback=fb)
-            if df.empty:
+            df = _fresh_df(ticker, tf, DEFAULT_PERIOD.get(tf), pkey, fb, live_price)
+            if df is None or df.empty:
                 st.error(f"Không tải được dữ liệu khung {tf}.")
                 continue
             results[tf] = (analyze_timeframe(df, tf), df)
@@ -488,9 +555,34 @@ def render_tab_analyzer() -> None:
     # Trạng thái cập nhật
     lu = st.session_state.get("last_update", "—")
     status = f"🕒 Cập nhật cuối: **{lu}**"
+    # Giờ của cây nến mới nhất (từ khung nhỏ nhất đang phân tích)
+    try:
+        smallest_tf = list(results.keys())[0]
+        last_candle = results[smallest_tf][1].index[-1]
+        last_px = float(results[smallest_tf][1]["Close"].iloc[-1])
+        status += (f" &nbsp;·&nbsp; 🕯️ Nến cuối {smallest_tf}: "
+                   f"**{last_candle:%d/%m %H:%M}** @ giá **{last_px:,.2f}**")
+    except (IndexError, KeyError, ValueError):
+        pass
     if auto_refresh:
         status += f" &nbsp;·&nbsp; 🔄 Auto-refresh {refresh_sec}s (đã {refresh_count} lần)"
     st.caption(status)
+
+    # ===== GIÁ TƯƠI REAL-TIME (đã lấy sớm + đã vá vào phân tích) =====
+    if data_source != "yfinance":
+        rt = live_info
+        if rt and "price" in rt:
+            extra = ""
+            if rt.get("bid") and rt.get("ask"):
+                extra = f" &nbsp;|&nbsp; Bid {rt['bid']} / Ask {rt['ask']}"
+            st.success(
+                f"📡 **Giá tươi {rt['symbol']}: {rt['price']}** "
+                f"(nguồn: {rt['source']}){extra} &nbsp;✅ đã dùng cho phân tích"
+            )
+        elif rt and "error" in rt:
+            st.warning(f"📡 {rt['error']} — phân tích đang dùng dữ liệu yfinance.")
+        else:
+            st.warning("📡 Chưa lấy được giá tươi — phân tích đang dùng yfinance.")
 
     cols = st.columns(len(results))
     for col, (tf, (res, _)) in zip(cols, results.items()):
@@ -502,7 +594,7 @@ def render_tab_analyzer() -> None:
             )
 
     # ---- VÙNG ĐẢO CHIỀU + TÍN HIỆU M1 ----
-    _render_reversal_section(ticker, pkey, sym['fallback'])
+    _render_reversal_section(ticker, pkey, sym['fallback'], live_price)
 
     # ---- Chế độ xem: chia màn hình đa khung hoặc tabs ----
     st.divider()
