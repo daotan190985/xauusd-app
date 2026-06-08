@@ -99,7 +99,7 @@ def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=900, max_entries=50, persist="disk", show_spinner=False)
+@st.cache_data(ttl=120, max_entries=50, persist="disk", show_spinner=False)
 def fetch_raw_data(ticker: str, interval: str, period: str,
                    fallback: Optional[str] = None) -> pd.DataFrame:
     """
@@ -147,7 +147,7 @@ def fetch_raw_data(ticker: str, interval: str, period: str,
     return pd.DataFrame()
 
 
-@st.cache_data(ttl=900, max_entries=50, persist="disk", show_spinner=False)
+@st.cache_data(ttl=120, max_entries=50, persist="disk", show_spinner=False)
 def get_processed_data(
     ticker: str, interval: str, period: Optional[str] = None,
     params_key: Optional[tuple] = None, fallback: Optional[str] = None,

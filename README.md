@@ -11,6 +11,9 @@ chuyên nghiệp cho vàng (XAU/USD), dữ liệu miễn phí từ yfinance.
 - **Vùng đảo chiều & tín hiệu M1**: phát hiện vùng hỗ trợ/kháng cự mạnh từ **Fibonacci 161.8%
   extension** + **EMA 200/1200 động** trên khung lớn. Khi giá chạm vùng → đánh dấu trên biểu đồ
   + kiểm tra **hội tụ M1** (%BB then chốt + Stochastic + MACD tách histogram) → báo "CÂN NHẮC MUA/BÁN".
+- **Nguồn dữ liệu real-time (giảm trễ)**: chọn linh hoạt trong app giữa yfinance (free, trễ ~15 phút),
+  **Twelve Data** (real-time forex+crypto+XAU, free 800 lệnh/ngày) và **GoldAPI** (real-time XAU chính xác).
+  Nhập API key trong sidebar hoặc đặt trong `st.secrets`. Tự fallback yfinance khi thiếu key/hết quota.
 - **Tùy chỉnh chỉ báo giống TradingView**: chỉnh tham số (EMA length, BB length/std, MACD fast/slow/signal,
   ADX/RSI period, Stochastic, Keltner length/mult) và **đổi màu từng đường** bằng color picker,
   biểu đồ cập nhật ngay.
