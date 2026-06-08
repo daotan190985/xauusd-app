@@ -36,7 +36,6 @@ REQUEST_TIMEOUT = 8  # giây
 
 def get_twelvedata_price(symbol_label: str, api_key: str) -> Optional[dict]:
     """
-<<<<<<< HEAD
     Lấy giá real-time từ Twelve Data (endpoint /price).
     Trả về {'price','source','symbol'} hoặc {'error': '...'}.
     """
@@ -68,34 +67,11 @@ def get_twelvedata_price(symbol_label: str, api_key: str) -> Optional[dict]:
         return {"error": f"Lỗi kết nối Twelve Data: {str(e)[:100]}"}
     except (ValueError, KeyError) as e:
         return {"error": f"Lỗi đọc dữ liệu Twelve Data: {str(e)[:100]}"}
-=======
-    Lấy giá real-time từ Twelve Data (endpoint /price + /quote).
-    Trả về {'price', 'source', 'symbol'} hoặc None nếu lỗi.
-    """
-    sym = TWELVEDATA_SYMBOLS.get(symbol_label)
-    if not sym or not api_key:
-        return None
-    try:
-        url = "https://api.twelvedata.com/price"
-        r = requests.get(url, params={"symbol": sym, "apikey": api_key},
-                         timeout=REQUEST_TIMEOUT)
-        data = r.json()
-        # Twelve Data trả {"price": "4665.82"} hoặc {"code":..,"message":..}
-        if "price" in data:
-            return {"price": float(data["price"]), "source": "Twelve Data",
-                    "symbol": sym}
-        logger.warning("Twelve Data lỗi: %s", data.get("message", data))
-        return None
-    except (requests.RequestException, ValueError, KeyError) as e:
-        logger.warning("Twelve Data request lỗi: %s", e)
-        return None
->>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
 
 
 def get_goldapi_price(symbol_label: str, api_key: str) -> Optional[dict]:
     """
     Lấy giá real-time XAU từ GoldAPI.io. Chỉ áp dụng cho vàng.
-<<<<<<< HEAD
     Trả về {'price','bid','ask','source','symbol'} hoặc
             {'error': 'mô tả lỗi'} để app hiển thị nguyên nhân.
     """
@@ -113,17 +89,6 @@ def get_goldapi_price(symbol_label: str, api_key: str) -> Optional[dict]:
                              f"{r.status_code}). Kiểm tra lại key trên goldapi.io."}
         if r.status_code == 429:
             return {"error": "Hết quota GoldAPI (HTTP 429). Chờ reset hoặc nâng gói."}
-=======
-    Trả về {'price','bid','ask','source','symbol'} hoặc None.
-    """
-    if "XAU" not in symbol_label or not api_key:
-        return None
-    try:
-        # GoldAPI: GET https://www.goldapi.io/api/XAU/USD , header x-access-token
-        url = "https://www.goldapi.io/api/XAU/USD"
-        r = requests.get(url, headers={"x-access-token": api_key},
-                         timeout=REQUEST_TIMEOUT)
->>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
         data = r.json()
         if "price" in data:
             return {
@@ -132,7 +97,6 @@ def get_goldapi_price(symbol_label: str, api_key: str) -> Optional[dict]:
                 "source": f"GoldAPI ({data.get('exchange', 'FOREX')})",
                 "symbol": "XAU/USD",
             }
-<<<<<<< HEAD
         return {"error": f"GoldAPI trả về bất thường: {str(data)[:120]}"}
     except requests.Timeout:
         return {"error": "GoldAPI quá thời gian chờ (mạng chậm/chặn)."}
@@ -140,13 +104,6 @@ def get_goldapi_price(symbol_label: str, api_key: str) -> Optional[dict]:
         return {"error": f"Lỗi kết nối GoldAPI: {str(e)[:100]}"}
     except (ValueError, KeyError) as e:
         return {"error": f"Lỗi đọc dữ liệu GoldAPI: {str(e)[:100]}"}
-=======
-        logger.warning("GoldAPI lỗi: %s", data)
-        return None
-    except (requests.RequestException, ValueError, KeyError) as e:
-        logger.warning("GoldAPI request lỗi: %s", e)
-        return None
->>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
 
 
 def get_realtime_price(
@@ -163,7 +120,6 @@ def get_realtime_price(
     if source == "goldapi":
         return get_goldapi_price(symbol_label, goldapi_key)
     return None  # yfinance: không có "giá tươi" riêng, dùng close nến cuối
-<<<<<<< HEAD
 
 
 def apply_live_price(df, live_price: float):
@@ -185,5 +141,3 @@ def apply_live_price(df, live_price: float):
     if live_price < out.loc[i, "Low"]:
         out.loc[i, "Low"] = live_price
     return out
-=======
->>>>>>> 12ec15d4e8bbe75ec9786269ad1e64354f664a6d
