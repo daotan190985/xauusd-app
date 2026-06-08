@@ -381,6 +381,10 @@ def build_full_chart(
 
     # Trục THỜI GIAN dễ nhìn: chỉ hiện ở hàng dưới cùng, định dạng giờ:phút,
     # bỏ khoảng trống cuối tuần (rangebreaks) để nến liền mạch.
+    # Vàng/forex nghỉ T7+CN -> ẩn 2 ngày này cho biểu đồ liền mạch.
+    rb = [dict(bounds=["sat", "mon"])]  # ẩn từ thứ 7 đến hết CN
+    for i in range(1, n_rows + 1):
+        fig.update_xaxes(rangebreaks=rb, row=i, col=1)
     fig.update_xaxes(
         showticklabels=False, row=1, col=1,  # ẩn nhãn ở hàng giá cho gọn
     )
@@ -414,6 +418,8 @@ def build_full_chart(
     if "stoch" in row_of:
         fig.update_yaxes(range=[0, 100], row=row_of["stoch"], col=1)
 
+    # Lưu map panel->row để vẽ mũi tên đúng ô (app dùng)
+    fig._row_of = row_of
     return fig
 
 
@@ -511,4 +517,54 @@ def add_reversal_zones(fig: go.Figure, zones_info: dict) -> go.Figure:
             annotation_font=dict(size=10, color=color),
             row=1, col=1,
         )
+    return fig
+
+
+def add_signal_arrows(fig, df, points: dict):
+    """
+    Vẽ MŨI TÊN NHỎ cho 3 tín hiệu, màu theo hướng (xanh=MUA, đỏ=BÁN):
+      - %BB (cốt lõi): mũi tên trên BIỂU ĐỒ GIÁ + trên ô %B
+      - Stoch: mũi tên trên ô Stochastic
+      - ADX/DI: mũi tên trên ô ADX
+    points: kết quả từ analyzer.signal_points(df).
+    Vẽ mũi tên ở vị trí gần nhất mỗi loại (tránh rối), nhỏ gọn.
+    """
+    if not points:
+        return fig
+    row_of = getattr(fig, "_row_of", {"price": 1})
+    GREEN, RED = "#089981", "#F23645"
+
+    def _arrow(ts, y, up, color, row, size=11):
+        if ts not in df.index:
+            return
+        fig.add_annotation(
+            x=ts, y=y, text=("▲" if up else "▼"),
+            showarrow=False, font=dict(size=size, color=color),
+            row=row, col=1, yshift=(8 if up else -8),
+        )
+
+    # --- %BB (CỐT LÕI) — vẽ trên giá + ô %B, mũi tên rõ hơn chút ---
+    for ts in points.get("bb", {}).get("sell", [])[-5:]:
+        _arrow(ts, float(df.loc[ts, "High"]) if ts in df.index else 0, False, RED, 1, 13)
+        if "pctb" in row_of:
+            _arrow(ts, 1.0, False, RED, row_of["pctb"], 12)
+    for ts in points.get("bb", {}).get("buy", [])[-5:]:
+        _arrow(ts, float(df.loc[ts, "Low"]) if ts in df.index else 0, True, GREEN, 1, 13)
+        if "pctb" in row_of:
+            _arrow(ts, 0.0, True, GREEN, row_of["pctb"], 12)
+
+    # --- Stochastic — trên ô stoch + nhắc trên giá ---
+    if "stoch" in row_of:
+        for ts in points.get("stoch", {}).get("sell", [])[-3:]:
+            _arrow(ts, 85, False, RED, row_of["stoch"])
+        for ts in points.get("stoch", {}).get("buy", [])[-3:]:
+            _arrow(ts, 15, True, GREEN, row_of["stoch"])
+
+    # --- ADX/DI — trên ô adx ---
+    if "adx" in row_of:
+        for ts in points.get("adx", {}).get("sell", [])[-3:]:
+            _arrow(ts, 22, False, RED, row_of["adx"])
+        for ts in points.get("adx", {}).get("buy", [])[-3:]:
+            _arrow(ts, 22, True, GREEN, row_of["adx"])
+
     return fig

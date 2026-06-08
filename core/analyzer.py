@@ -1254,3 +1254,183 @@ def three_tier_entry(frames: dict, df_m1: pd.DataFrame) -> dict:
     else:
         out["note"] = f"Chưa hội tụ (mới {out['score']}/3 tầng)."
     return out
+
+
+# ============================================================================
+# TÍN HIỆU LEO THANG KHUNG (escalation) — nguyên tắc thực chiến của user
+# %B vượt band >=2 lần trong vùng gần nhau -> mô hình đỉnh/đáy sideway.
+# Báo khung nhỏ + xác nhận khung lớn hơn 1 bậc = AN TOÀN.
+# ============================================================================
+
+# Thứ tự khung từ nhỏ -> lớn, để biết "khung lớn hơn 1 bậc"
+TF_LADDER = ["1m", "5m", "15m", "30m", "60m", "4h", "1d"]
+
+
+def detect_band_touches(df: pd.DataFrame, window: int = 12,
+                        min_touches: int = 2) -> dict:
+    """
+    Phát hiện mô hình %B VƯỢT BAND >=min_touches lần trong 'window' nến gần nhất
+    (các lần vượt nằm gần nhau = đỉnh/đáy sideway).
+
+    Trả về:
+      {
+        'pattern': bool,           # có mô hình
+        'side': 'top'/'bottom'/None,  # đỉnh (band trên) hay đáy (band dưới)
+        'touches': int,            # số lần vượt
+        'direction': 'BÁN'/'MUA'/None, # đỉnh->BÁN, đáy->MUA
+        'touch_idx': [vị trí các lần vượt]  # để vẽ mũi tên
+      }
+    """
+    out = {"pattern": False, "side": None, "touches": 0,
+           "direction": None, "touch_idx": []}
+    if df is None or len(df) < window or "PCT_B" not in df:
+        return out
+
+    recent = df["PCT_B"].tail(window)
+    vals = recent.values
+    idxs = recent.index
+
+    # Đếm lần vượt band trên (%B >= 1) và band dưới (%B <= 0)
+    top_idx = [idxs[i] for i, v in enumerate(vals) if pd.notna(v) and v >= 0.98]
+    bot_idx = [idxs[i] for i, v in enumerate(vals) if pd.notna(v) and v <= 0.02]
+
+    if len(top_idx) >= min_touches:
+        out.update(pattern=True, side="top", touches=len(top_idx),
+                   direction="BÁN", touch_idx=top_idx)
+    elif len(bot_idx) >= min_touches:
+        out.update(pattern=True, side="bottom", touches=len(bot_idx),
+                   direction="MUA", touch_idx=bot_idx)
+    return out
+
+
+def escalation_scan(frames: dict) -> dict:
+    """
+    QUÉT MÔ HÌNH LEO THANG trên tất cả khung trong frames.
+
+    frames: {tf: df_đã_có_chỉ_báo}.
+    Tìm các khung có mô hình %B vượt band >=2 lần. Với mỗi khung có mô hình,
+    kiểm tra khung LỚN HƠN 1 BẬC có cùng hướng không -> nếu có = AN TOÀN.
+
+    Trả về:
+      {
+        'signals': [
+          {tf, direction, touches, confirmed_by, safe(bool), touch_idx}
+        ],
+        'best': tín hiệu an toàn nhất (nếu có),
+      }
+    """
+    out = {"signals": [], "best": None}
+    # Phát hiện mô hình từng khung
+    patterns = {}
+    for tf, df in frames.items():
+        p = detect_band_touches(df)
+        if p["pattern"]:
+            patterns[tf] = p
+
+    for tf, p in patterns.items():
+        # Tìm khung lớn hơn 1 bậc
+        confirmed_by = None
+        safe = False
+        if tf in TF_LADDER:
+            pos = TF_LADDER.index(tf)
+            # duyệt các khung lớn hơn để tìm xác nhận cùng hướng
+            for bigger in TF_LADDER[pos + 1:]:
+                if bigger in patterns and patterns[bigger]["direction"] == p["direction"]:
+                    confirmed_by = bigger
+                    safe = True
+                    break
+        sig = {
+            "tf": tf, "direction": p["direction"], "touches": p["touches"],
+            "confirmed_by": confirmed_by, "safe": safe, "touch_idx": p["touch_idx"],
+        }
+        out["signals"].append(sig)
+
+    # Tín hiệu tốt nhất: ưu tiên safe, rồi nhiều lần chạm
+    safe_sigs = [s for s in out["signals"] if s["safe"]]
+    if safe_sigs:
+        out["best"] = max(safe_sigs, key=lambda s: s["touches"])
+    elif out["signals"]:
+        out["best"] = max(out["signals"], key=lambda s: s["touches"])
+    return out
+
+
+def target_by_tf(tf: str, entry_price: float, direction: str,
+                 df: pd.DataFrame) -> dict:
+    """
+    Tính target tối thiểu 2 nến theo khung. Dùng ATR đơn giản (biên độ nến TB)
+    để ước lượng quãng đường ~2 nến.
+    """
+    out = {"entry": round(entry_price, 2), "target": None, "sl": None}
+    if df is None or len(df) < 14:
+        return out
+    # Biên độ trung bình 14 nến gần nhất (range High-Low)
+    rng = (df["High"] - df["Low"]).tail(14).mean()
+    if pd.isna(rng) or rng <= 0:
+        return out
+    move = rng * 2  # tối thiểu 2 nến
+    if direction == "MUA":
+        out["target"] = round(entry_price + move, 2)
+        out["sl"] = round(entry_price - rng, 2)
+    else:
+        out["target"] = round(entry_price - move, 2)
+        out["sl"] = round(entry_price + rng, 2)
+    out["move_pips"] = round(move, 2)
+    return out
+
+
+# ============================================================================
+# ĐIỂM TÍN HIỆU CHO MŨI TÊN (%BB cốt lõi + Stoch + ADX/DI)
+# Trả về các vị trí (index) + hướng để vẽ mũi tên nhỏ trên chart.
+# ============================================================================
+def signal_points(df: pd.DataFrame, window: int = 30) -> dict:
+    """
+    Quét 'window' nến gần nhất, tìm điểm phát tín hiệu của 3 chỉ báo:
+      - bb    : %B vượt band trên (BÁN) / dưới (MUA)  [CỐT LÕI]
+      - stoch : %K cắt %D ở vùng quá mua (BÁN) / quá bán (MUA)
+      - adx   : DI+ cắt lên DI- (MUA) / DI- cắt lên DI+ (BÁN)
+
+    Trả về dict mỗi loại: {'buy': [idx...], 'sell': [idx...]}
+    """
+    out = {"bb": {"buy": [], "sell": []},
+           "stoch": {"buy": [], "sell": []},
+           "adx": {"buy": [], "sell": []}}
+    if df is None or len(df) < 3:
+        return out
+
+    sub = df.tail(window)
+    idxs = sub.index
+
+    for i in range(1, len(sub)):
+        ts = idxs[i]
+        prev = sub.iloc[i - 1]
+        cur = sub.iloc[i]
+
+        # --- %BB (cốt lõi) ---
+        pb = cur.get("PCT_B")
+        if pd.notna(pb):
+            if pb >= 0.98:
+                out["bb"]["sell"].append(ts)   # vượt band trên -> đảo xuống
+            elif pb <= 0.02:
+                out["bb"]["buy"].append(ts)     # vượt band dưới -> đảo lên
+
+        # --- Stochastic: %K cắt %D ---
+        k0, d0 = prev.get("STOCH_K"), prev.get("STOCH_D")
+        k1, d1 = cur.get("STOCH_K"), cur.get("STOCH_D")
+        if all(pd.notna(x) for x in [k0, d0, k1, d1]):
+            # cắt xuống ở vùng quá mua -> BÁN
+            if k0 >= d0 and k1 < d1 and k1 > 70:
+                out["stoch"]["sell"].append(ts)
+            # cắt lên ở vùng quá bán -> MUA
+            elif k0 <= d0 and k1 > d1 and k1 < 30:
+                out["stoch"]["buy"].append(ts)
+
+        # --- ADX/DI: DI cross ---
+        dip0, dim0 = prev.get("DI_PLUS"), prev.get("DI_MINUS")
+        dip1, dim1 = cur.get("DI_PLUS"), cur.get("DI_MINUS")
+        if all(pd.notna(x) for x in [dip0, dim0, dip1, dim1]):
+            if dip0 <= dim0 and dip1 > dim1:   # DI+ cắt lên -> MUA
+                out["adx"]["buy"].append(ts)
+            elif dim0 <= dip0 and dim1 > dip1:  # DI- cắt lên -> BÁN
+                out["adx"]["sell"].append(ts)
+
+    return out

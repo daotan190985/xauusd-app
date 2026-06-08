@@ -30,7 +30,9 @@ from core.analyzer import (
     compute_reversal_zones,
     detect_pullback_zone,
     ema1200_scalp_signal,
+    escalation_scan,
     m1_confluence_check,
+    target_by_tf,
     three_tier_entry,
 )
 from core.charts import (
@@ -40,6 +42,7 @@ from core.charts import (
     ChartOptions,
     add_fibonacci,
     add_reversal_zones,
+    add_signal_arrows,
     build_full_chart,
 )
 from core.data import (
@@ -267,6 +270,66 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
     else:
         st.info(f"🎯 {tt['note']}")
 
+    # ===== TÍN HIỆU LEO THANG KHUNG (mô hình %B vượt band nhiều lần) =====
+    st.markdown("##### 🎯 Tín hiệu leo thang (mô hình %B vượt band ≥2 lần)")
+    esc = escalation_scan(frames3)
+    if esc["best"]:
+        b = esc["best"]
+        dfb = frames3.get(b["tf"])
+        tgt = target_by_tf(b["tf"], dfb["Close"].iloc[-1], b["direction"], dfb) if dfb is not None else {}
+        if b["safe"]:
+            c = "#089981" if b["direction"] == "MUA" else "#F23645"
+            st.markdown(
+                f"<div style='background:{c};color:#fff;padding:16px;border-radius:12px;"
+                f"font-size:19px;font-weight:800;text-align:center'>"
+                f"✅ AN TOÀN — {b['direction']} khung {b['tf']} "
+                f"(xác nhận bởi {b['confirmed_by']}) · {b['touches']} lần chạm band</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div style='background:#3a2f16;color:#FFD54F;padding:13px;border-radius:10px;"
+                f"font-weight:700;text-align:center;border:1px solid #D4A017'>"
+                f"⚠️ {b['direction']} khung {b['tf']} ({b['touches']} lần) — "
+                f"chưa có khung lớn xác nhận, theo dõi thêm</div>",
+                unsafe_allow_html=True,
+            )
+        if tgt.get("target"):
+            st.caption(f"📍 Entry ~{tgt['entry']} · 🎯 Target {tgt['target']} "
+                       f"· 🛑 SL {tgt['sl']} (tối thiểu 2 nến, ~{tgt.get('move_pips','')} giá)")
+        # Liệt kê tất cả khung có mô hình
+        rows = " · ".join(
+            f"{s['tf']}:{s['direction']}({s['touches']})" + ("✅" if s['safe'] else "")
+            for s in esc["signals"])
+        st.caption(f"Các khung có mô hình: {rows}")
+
+        # Lưu lịch sử tín hiệu
+        import datetime as _dt
+        hist = st.session_state.setdefault("signal_history", [])
+        sig_id = f"{b['tf']}_{b['direction']}_{dfb.index[-1]}"
+        if not hist or hist[-1].get("id") != sig_id:
+            hist.append({
+                "id": sig_id, "time": _dt.datetime.now().strftime("%H:%M:%S"),
+                "tf": b["tf"], "direction": b["direction"],
+                "safe": b["safe"], "touches": b["touches"],
+                "entry": tgt.get("entry"), "target": tgt.get("target"),
+            })
+            st.session_state["signal_history"] = hist[-30:]  # giữ 30 gần nhất
+    else:
+        st.info("🎯 Chưa có mô hình %B vượt band ở khung nào.")
+
+    # Lịch sử tín hiệu
+    hist = st.session_state.get("signal_history", [])
+    if hist:
+        with st.expander(f"📜 Lịch sử tín hiệu ({len(hist)})", expanded=False):
+            for h in reversed(hist[-15:]):
+                mk = "✅" if h["safe"] else "⚠️"
+                st.markdown(
+                    f"{mk} {h['time']} · **{h['direction']}** {h['tf']} "
+                    f"({h['touches']} lần) · Entry {h.get('entry','—')} → "
+                    f"Target {h.get('target','—')}"
+                )
+
     st.divider()
     st.markdown("##### ⚡ Scalp theo EMA1200 khung lớn")
     sc1, sc2 = st.columns([1, 2])
@@ -474,8 +537,8 @@ def render_tab_analyzer() -> None:
                                  key="auto_refresh")
         # Slider chọn khoảng thời gian: 10s - 300s, mặc định 60s
         refresh_sec = st.slider(
-            "Khoảng thời gian (giây)", min_value=10, max_value=300,
-            value=60, step=5, key="refresh_sec",
+            "Khoảng thời gian (giây)", min_value=10, max_value=600,
+            value=600, step=10, key="refresh_sec",
         )
 
         refresh_count = 0
@@ -525,6 +588,9 @@ def render_tab_analyzer() -> None:
         if not selected_tfs:
             st.warning("Vui lòng chọn ít nhất một khung thời gian.")
             return
+        # LUÔN xóa cache trước khi phân tích -> lấy dữ liệu MỚI NHẤT, không bị trễ
+        clear_processed_cache()
+        clear_raw_cache()
         results = {}
         prog = st.progress(0.0, text="Đang tải & phân tích...")
         for i, tf in enumerate(selected_tfs):
@@ -661,6 +727,9 @@ def render_tab_analyzer() -> None:
                 if fig:
                     if show_fib:
                         add_fibonacci(fig, df)
+                    # Vẽ mũi tên 3 tín hiệu (%BB cốt lõi + Stoch + ADX)
+                    from core.analyzer import signal_points
+                    add_signal_arrows(fig, df, signal_points(df))
                     st.plotly_chart(fig, use_container_width=True,
                                     config=PLOTLY_CONFIG)
 
