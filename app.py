@@ -28,12 +28,15 @@ from core.analyzer import (
     aggregate_signals,
     analyze_timeframe,
     compute_reversal_zones,
+    count_band_tests,
     detect_pullback_zone,
     ema1200_scalp_signal,
     escalation_scan,
+    h4_band_context,
     m1_confluence_check,
     target_by_tf,
     three_tier_entry,
+    trend_direction,
 )
 from core.charts import (
     ALL_INDICATORS,
@@ -318,6 +321,65 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
     else:
         st.info("🎯 Chưa có mô hình %B vượt band ở khung nào.")
 
+    # ===== ĐẾM TEST BAND + BỐI CẢNH H4/H1 (nguyên tắc chi tiết) =====
+    st.markdown("##### 🔢 Đếm test band & điều kiện vào lệnh")
+    # Điều kiện nền: H4 phải gần/chạm band
+    df_h4 = frames3.get("4h")
+    df_h1 = frames3.get("60m")
+    ctx = h4_band_context(df_h4)
+    trend_h4 = trend_direction(df_h4) if df_h4 is not None else "NGANG"
+    trend_h1 = trend_direction(df_h1) if df_h1 is not None else "NGANG"
+
+    if ctx["ok"]:
+        st.success(f"✅ Điều kiện nền: {ctx['note']} · Xu hướng H4 {trend_h4}, H1 {trend_h1}")
+    else:
+        st.warning(f"⚠️ {ctx['note']} Chưa đủ điều kiện nền (H4 cần gần/chạm band) — "
+                   f"tín hiệu đếm band kém tin cậy.")
+
+    # Đếm test band cho các khung nhỏ
+    test_tfs = ["60m", "30m", "15m", "5m", "1m"]
+    found_entry = False
+    for tf in test_tfs:
+        dft = frames3.get(tf) if tf != "1m" else df_m1_3
+        if dft is None or dft.empty:
+            continue
+        # Xác định đỉnh hay đáy theo %B hiện tại
+        pb_now = dft["PCT_B"].iloc[-1] if "PCT_B" in dft else 0.5
+        side = "top" if pb_now >= 0.5 else "bottom"
+        ct = count_band_tests(dft, window=12, side=side)
+        if ct["decision"] == "VÀO":
+            found_entry = True
+            direction = "BÁN" if side == "top" else "MUA"
+            # Cảnh báo ngược xu hướng lớn
+            warn = ""
+            big_trend = trend_h4 if trend_h4 != "NGANG" else trend_h1
+            if (direction == "BÁN" and big_trend == "TĂNG") or \
+               (direction == "MUA" and big_trend == "GIẢM"):
+                warn = " ⚠️ NGƯỢC xu hướng lớn — cẩn thận!"
+            c = "#F23645" if direction == "BÁN" else "#089981"
+            strong = " 🔥 (đụng band %B không vượt 1)" if ct["touched_not_break"] else ""
+            st.markdown(
+                f"<div style='background:{c};color:#fff;padding:13px;border-radius:10px;"
+                f"font-weight:700;margin-bottom:6px'>"
+                f"{direction} khung {tf} — test band {ct['count']} lần{strong}<br>"
+                f"🎯 Mục tiêu {ct['pip_target']} pip{warn}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"  {ct['note']}")
+    if not found_entry:
+        # Hiện trạng thái đếm gần nhất để theo dõi
+        statuses = []
+        for tf in test_tfs:
+            dft = frames3.get(tf) if tf != "1m" else df_m1_3
+            if dft is None or dft.empty:
+                continue
+            pb_now = dft["PCT_B"].iloc[-1] if "PCT_B" in dft else 0.5
+            side = "top" if pb_now >= 0.5 else "bottom"
+            ct = count_band_tests(dft, window=12, side=side)
+            statuses.append(f"{tf}:{ct['count']}lần")
+        st.info(f"🔢 Chưa đủ điều kiện vào (cần test band 2-4 lần). "
+                f"Hiện tại: {' · '.join(statuses)}")
+
     # Lịch sử tín hiệu
     hist = st.session_state.get("signal_history", [])
     if hist:
@@ -462,20 +524,45 @@ def _safe_secret(key: str) -> str:
         return ""
 
 
-def _fresh_df(ticker, tf, period, pkey, fb, live_price=None):
+def _fresh_df(ticker, tf, period, pkey, fb, live_price=None,
+              source=None, td_key=None, symbol_label=None):
     """
-    Lấy DataFrame đã có chỉ báo. NẾU có giá tươi (live_price), vá vào cây nến
-    cuối rồi TÍNH LẠI chỉ báo -> phân tích phản ánh đúng giá hiện tại.
-    Đây là chìa khoá để tín hiệu không bị trễ theo yfinance.
+    Lấy DataFrame đã có chỉ báo.
+
+    Ưu tiên NẾN TƯƠI:
+      - Nếu nguồn = Twelve Data + có key: lấy NẾN OHLC real-time từ Twelve Data
+        -> biểu đồ + chỉ báo đều khớp TradingView, không trễ.
+      - Nếu không: dùng yfinance (có thể vá giá tươi vào nến cuối nếu có live_price).
+    Tự fallback yfinance nếu Twelve Data lỗi.
+
+    source/td_key/symbol_label: nếu không truyền, đọc từ session_state.
     """
     from core.analyzer import IndicatorParams, add_indicators
-    df = get_processed_data(ticker, tf, period, pkey, fallback=fb)
-    if df is None or df.empty or not live_price:
-        return df
-    # Vá giá tươi vào nến cuối + tính lại chỉ báo trên dữ liệu đã vá
-    patched = apply_live_price(df[["Open", "High", "Low", "Close", "Volume"]], live_price)
+    from core.realtime import get_twelvedata_ohlc
+    # Đọc cấu hình nguồn từ session nếu không truyền trực tiếp
+    if source is None:
+        source = st.session_state.get("_src", "yfinance")
+    if td_key is None:
+        td_key = st.session_state.get("_tdkey", "")
+    if symbol_label is None:
+        symbol_label = st.session_state.get("cur_symbol", "")
     params = IndicatorParams(*pkey) if pkey else None
-    return add_indicators(patched, params)
+
+    # 1) Thử lấy nến tươi từ Twelve Data
+    if source == "twelvedata" and td_key and symbol_label:
+        raw = get_twelvedata_ohlc(symbol_label, tf, td_key, outputsize=500)
+        if raw is not None and not raw.empty and len(raw) > 50:
+            return add_indicators(raw, params)
+
+    # 2) yfinance (mặc định / fallback)
+    df = get_processed_data(ticker, tf, period, pkey, fallback=fb)
+    if df is None or df.empty:
+        return df
+    if live_price:
+        patched = apply_live_price(
+            df[["Open", "High", "Low", "Close", "Volume"]], live_price)
+        return add_indicators(patched, params)
+    return df
 
 
 def render_tab_analyzer() -> None:
@@ -530,6 +617,11 @@ def render_tab_analyzer() -> None:
                 help="Đăng ký free tại goldapi.io",
                 key="gold_key",
             )
+        # Lưu cấu hình nguồn để _fresh_df dùng nến tươi Twelve Data
+        st.session_state["_src"] = data_source
+        st.session_state["_tdkey"] = td_key
+        if data_source == "twelvedata" and td_key:
+            st.caption("📊 Biểu đồ + chỉ báo dùng NẾN TƯƠI Twelve Data (khớp TradingView)")
 
         st.divider()
         st.subheader("🔄 Tự động làm mới")
@@ -711,9 +803,11 @@ def render_tab_analyzer() -> None:
                     index=TIMEFRAMES.index(defaults[i]) if defaults[i] in TIMEFRAMES else 2,
                     key=f"pane_tf_{i}",
                 )
-                # Tự load dữ liệu khung này (độc lập). Dùng cache nên nhanh.
-                df = get_processed_data(ticker, pane_tf, DEFAULT_PERIOD.get(pane_tf), pkey, fallback=fb)
-                if df.empty:
+                # Load dữ liệu khung này — DÙNG NẾN TƯƠI (Twelve Data) nếu có,
+                # để biểu đồ khớp TradingView, không trễ.
+                df = _fresh_df(ticker, pane_tf, DEFAULT_PERIOD.get(pane_tf),
+                               pkey, fb)
+                if df is None or df.empty:
                     st.warning(f"Không có dữ liệu khung {pane_tf}.")
                     continue
                 res = analyze_timeframe(df, pane_tf)

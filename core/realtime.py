@@ -141,3 +141,50 @@ def apply_live_price(df, live_price: float):
     if live_price < out.loc[i, "Low"]:
         out.loc[i, "Low"] = live_price
     return out
+
+
+# Map khung của app -> interval của Twelve Data
+TD_INTERVAL = {
+    "1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
+    "60m": "1h", "4h": "4h", "1d": "1day",
+}
+
+
+def get_twelvedata_ohlc(symbol_label: str, interval: str, api_key: str,
+                        outputsize: int = 500):
+    """
+    Lấy NẾN OHLC real-time từ Twelve Data (endpoint /time_series).
+    Trả về DataFrame [Open,High,Low,Close,Volume] index thời gian TĂNG DẦN,
+    hoặc None nếu lỗi. Đây là dữ liệu TƯƠI -> biểu đồ khớp TradingView.
+    """
+    import pandas as pd
+    sym = TWELVEDATA_SYMBOLS.get(symbol_label)
+    td_itv = TD_INTERVAL.get(interval)
+    if not sym or not td_itv or not api_key or not api_key.strip():
+        return None
+    try:
+        url = "https://api.twelvedata.com/time_series"
+        r = requests.get(url, params={
+            "symbol": sym, "interval": td_itv,
+            "outputsize": min(outputsize, 5000), "apikey": api_key.strip(),
+            "timezone": "UTC", "order": "ASC",
+        }, timeout=REQUEST_TIMEOUT + 4)
+        data = r.json()
+        if data.get("status") == "error" or "values" not in data:
+            logger.warning("TD time_series lỗi: %s", data.get("message", data))
+            return None
+        rows = data["values"]
+        if not rows:
+            return None
+        df = pd.DataFrame(rows)
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.set_index("datetime").sort_index()
+        rename = {"open": "Open", "high": "High", "low": "Low", "close": "Close"}
+        df = df.rename(columns=rename)
+        for c in ["Open", "High", "Low", "Close"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df["Volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
+        return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    except (requests.RequestException, ValueError, KeyError) as e:
+        logger.warning("TD time_series request lỗi: %s", e)
+        return None

@@ -1434,3 +1434,118 @@ def signal_points(df: pd.DataFrame, window: int = 30) -> dict:
                 out["adx"]["sell"].append(ts)
 
     return out
+
+
+# ============================================================================
+# ĐẾM TEST BAND + BỐI CẢNH KHUNG LỚN (nguyên tắc thực chiến chi tiết của user)
+# - Nến đi xuống rồi quay lại test band trên = 1 lần. 2-4 lần liên tục -> VÀO.
+#   5 lần -> KHÔNG vào (sắp phá lên, biên độ lớn).
+# - Đụng band mà %B không lên nổi 1 (0.85-0.99) = tín hiệu mạnh nhất.
+# - H4 phải GẦN/CHẠM band (kể cả band giữa) làm điều kiện nền.
+# - Lần 2 ~50 pip; lần 3 giữ 100 pip.
+# ============================================================================
+
+def count_band_tests(df: pd.DataFrame, window: int = 10, side: str = "top") -> dict:
+    """
+    Đếm số lần giá quay lại TEST band trong 'window' nến gần nhất.
+    Một "lần test" = %B vào sát band rồi lùi ra, rồi quay lại sát band.
+
+    side='top' (đỉnh, để BÁN): đếm lần %B >= 0.85
+    side='bottom' (đáy, để MUA): đếm lần %B <= 0.15
+
+    Trả về:
+      {
+        'count': số lần test,
+        'touched_not_break': bool,  # lần cuối đụng band nhưng %B KHÔNG vượt 1
+        'last_pct_b': giá trị %B mới nhất,
+        'decision': 'VÀO' / 'CHỜ' / 'KHÔNG' ,
+        'note': giải thích,
+        'pip_target': 50 hoặc 100,
+      }
+    """
+    out = {"count": 0, "touched_not_break": False, "last_pct_b": None,
+           "decision": "CHỜ", "note": "", "pip_target": 50}
+    if df is None or len(df) < window or "PCT_B" not in df:
+        return out
+
+    pb = df["PCT_B"].tail(window).values
+    out["last_pct_b"] = round(float(pb[-1]), 3) if pd.notna(pb[-1]) else None
+
+    # Đếm số "cụm" chạm band: mỗi lần %B vượt ngưỡng sau khi đã lùi ra
+    near = 0.85 if side == "top" else 0.15
+    count = 0
+    armed = True  # sẵn sàng đếm lần tiếp theo
+    for v in pb:
+        if pd.isna(v):
+            continue
+        is_near = (v >= near) if side == "top" else (v <= near)
+        if is_near and armed:
+            count += 1
+            armed = False        # đã đếm, chờ lùi ra mới đếm tiếp
+        elif not is_near:
+            # %B lùi khỏi band -> sẵn sàng đếm lần kế
+            mid_back = (v < 0.6) if side == "top" else (v > 0.4)
+            if mid_back:
+                armed = True
+    out["count"] = count
+
+    # Đụng band mà %B KHÔNG vượt 1 (top) / không xuống dưới 0 (bottom)
+    last = pb[-1]
+    if pd.notna(last):
+        if side == "top":
+            out["touched_not_break"] = 0.85 <= last < 1.0
+        else:
+            out["touched_not_break"] = 0.0 < last <= 0.15
+
+    # Quyết định theo số lần
+    if count >= 5:
+        out["decision"] = "KHÔNG"
+        out["note"] = "Đã test band ≥5 lần — nguy cơ phá band, biên độ lớn, không vào."
+    elif 2 <= count <= 4:
+        out["decision"] = "VÀO"
+        out["pip_target"] = 100 if count >= 3 else 50
+        extra = " — đụng band mà %B không vượt 1 (tín hiệu mạnh)" if out["touched_not_break"] else ""
+        out["note"] = (f"Test band {count} lần{extra}. "
+                       f"{'BÁN' if side=='top' else 'MUA'} — mục tiêu {out['pip_target']} pip "
+                       f"({'giữ ăn 100' if count>=3 else 'nến rút râu 50'} pip).")
+    else:
+        out["decision"] = "CHỜ"
+        out["note"] = f"Mới test band {count} lần — chờ đủ 2 lần."
+    return out
+
+
+def h4_band_context(df_h4: pd.DataFrame, tol: float = 0.004) -> dict:
+    """
+    Kiểm tra ĐIỀU KIỆN NỀN: H4 phải GẦN hoặc CHẠM band (kể cả band giữa).
+    tol: ngưỡng % coi là 'gần' (mặc định 0.4%).
+
+    Trả về {'ok': bool, 'where': 'band trên/giữa/dưới', 'note': ...}
+    """
+    out = {"ok": False, "where": None, "note": "H4 chưa gần band."}
+    if df_h4 is None or df_h4.empty:
+        return out
+    last = df_h4.iloc[-1]
+    price = last["Close"]
+    for col, name in [("BB_UP", "band trên"), ("BB_MID", "band giữa"),
+                      ("BB_LOW", "band dưới")]:
+        lvl = last.get(col)
+        if pd.notna(lvl) and lvl > 0 and abs(price - lvl) / price <= tol:
+            out.update(ok=True, where=name,
+                       note=f"H4 đang gần/chạm {name} ({lvl:.1f}) — đủ điều kiện nền.")
+            return out
+    return out
+
+
+def trend_direction(df: pd.DataFrame) -> str:
+    """Xu hướng đơn giản theo EMA: giá so EMA100/EMA200 -> TĂNG/GIẢM/NGANG."""
+    if df is None or df.empty:
+        return "NGANG"
+    last = df.iloc[-1]
+    price = last["Close"]
+    e100, e200 = last.get("EMA100"), last.get("EMA200")
+    if pd.notna(e100) and pd.notna(e200):
+        if price > e100 > e200:
+            return "TĂNG"
+        if price < e100 < e200:
+            return "GIẢM"
+    return "NGANG"
