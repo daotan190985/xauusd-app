@@ -554,18 +554,72 @@ def _fresh_df(ticker, tf, period, pkey, fb, live_price=None,
         raw = get_twelvedata_ohlc(symbol_label, tf, td_key, outputsize=500)
         if raw is not None and not raw.empty and len(raw) > 50:
             st.session_state["_td_ok"] = True
+            st.session_state[f"_srcused_{tf}"] = "Twelve Data (tươi)"
             return add_indicators(raw, params)
         st.session_state["_td_ok"] = False
+        st.session_state[f"_srcused_{tf}"] = "yfinance (TD lỗi/hết quota)"
 
     # 2) yfinance + vá giá tươi vào nến cuối (GoldAPI/yfinance)
     df = get_processed_data(ticker, tf, period, pkey, fallback=fb)
     if df is None or df.empty:
         return df
     if live_price:
+        st.session_state[f"_srcused_{tf}"] = "yfinance + vá giá tươi"
         patched = apply_live_price(
             df[["Open", "High", "Low", "Close", "Volume"]], live_price)
         return add_indicators(patched, params)
+    st.session_state.setdefault(f"_srcused_{tf}", "yfinance")
     return df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_calendar_cached():
+    """Tải lịch kinh tế, cache 30 phút để không gọi mạng liên tục."""
+    from core.calendar import fetch_calendar
+    return fetch_calendar()
+
+
+def _render_news_calendar():
+    """Hiển thị cảnh báo tin kinh tế mạnh (ưu tiên USD ảnh hưởng vàng)."""
+    from core.calendar import get_high_impact_events, format_event
+    try:
+        events = _load_calendar_cached()
+    except Exception:
+        events = None
+    if not events:
+        return  # không có dữ liệu thì im lặng, không làm rối
+
+    res = get_high_impact_events(events, hours_ahead=12)
+
+    # Cảnh báo NỔI BẬT nếu có tin mạnh trong 12h tới
+    if res["upcoming_soon"]:
+        lines = "<br>".join(format_event(e) for e in res["upcoming_soon"])
+        st.markdown(
+            f"<div style='background:#5c1a1a;border:2px solid #F23645;color:#fff;"
+            f"padding:13px;border-radius:10px;font-weight:600'>"
+            f"⚠️ <b>SẮP CÓ TIN MẠNH (12h tới) — TRÁNH VÀO LỆNH quanh giờ này:</b><br>"
+            f"{lines}</div>",
+            unsafe_allow_html=True,
+        )
+
+    # Danh sách tin mạnh hôm nay + cả tuần (thu gọn)
+    with st.expander("📅 Lịch kinh tế tuần (tin ảnh hưởng MẠNH — USD/vàng)",
+                     expanded=False):
+        if res["today"]:
+            st.markdown("**Hôm nay:**")
+            for e in res["today"]:
+                st.markdown(format_event(e))
+        else:
+            st.caption("Hôm nay không có tin USD ảnh hưởng mạnh.")
+        st.markdown("**Cả tuần:**")
+        if res["week_high"]:
+            for e in res["week_high"]:
+                st.markdown(format_event(e))
+        else:
+            st.caption("Tuần này không có tin USD ảnh hưởng mạnh.")
+        st.caption("Nguồn: ForexFactory · giờ hiển thị UTC+7 (VN). "
+                   "Tin mạnh có thể gây nhảy giá đột ngột — nên tránh vào lệnh "
+                   "trước/sau ~15-30 phút.")
 
 
 def render_tab_analyzer() -> None:
@@ -735,6 +789,9 @@ def render_tab_analyzer() -> None:
         status += f" &nbsp;·&nbsp; 🔄 Auto-refresh {refresh_sec}s (đã {refresh_count} lần)"
     st.caption(status)
 
+    # ===== CẢNH BÁO TIN KINH TẾ MẠNH (ForexFactory) =====
+    _render_news_calendar()
+
     # ===== GIÁ TƯƠI REAL-TIME (đã lấy sớm + đã vá vào phân tích) =====
     if data_source != "yfinance":
         rt = live_info
@@ -822,9 +879,14 @@ def render_tab_analyzer() -> None:
                 res = analyze_timeframe(df, pane_tf)
                 color = ("#089981" if "MUA" in res.direction
                          else "#F23645" if "BÁN" in res.direction else "#8b95a5")
+                # Giờ + giá nến cuối để đối chiếu MT5/TradingView (phát hiện lệch giờ)
+                last_ts = df.index[-1]
+                last_close = df["Close"].iloc[-1]
                 st.markdown(
                     f"<b style='color:{color}'>{pane_tf} — {res.direction} "
                     f"({res.score} điểm)</b>", unsafe_allow_html=True)
+                st.caption(f"🕯️ Nến cuối: {last_ts.strftime('%d/%m %H:%M')} (UTC) "
+                           f"@ giá {last_close:.2f} · 📡 {st.session_state.get(f'_srcused_{pane_tf}','?')}")
                 fig = build_full_chart(
                     df, title=f"{st.session_state.get('cur_symbol','XAU/USD')} — {pane_tf}", options=opt, height=pane_h)
                 if fig:

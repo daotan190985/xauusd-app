@@ -426,7 +426,7 @@ def build_full_chart(
 # Cấu hình ModeBar/scroll — pan/zoom mượt, reset, công cụ vẽ đầy đủ
 # drawline=trendline/horizontal, drawopenpath=vẽ tự do, drawrect, drawcircle
 PLOTLY_CONFIG = {
-    "scrollZoom": True,
+    "scrollZoom": True,        # cuộn + pinch 2 ngón để zoom (mobile)
     "displaylogo": False,
     "modeBarButtonsToAdd": [
         "drawline",       # Trendline / Horizontal line (giữ Shift = ngang)
@@ -439,6 +439,8 @@ PLOTLY_CONFIG = {
     "displayModeBar": True,
     "responsive": True,
     "editable": True,     # cho phép kéo/sửa hình đã vẽ (xem giá khi kéo line)
+    # Cảm ứng: cho phép pinch-zoom 2 ngón mượt như TradingView
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
 }
 
 
