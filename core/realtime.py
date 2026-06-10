@@ -183,8 +183,12 @@ def get_twelvedata_ohlc(symbol_label: str, interval: str, api_key: str,
         df = df.rename(columns=rename)
         for c in ["Open", "High", "Low", "Close"]:
             df[c] = pd.to_numeric(df[c], errors="coerce")
-        df["Volume"] = pd.to_numeric(df.get("volume", 0), errors="coerce").fillna(0)
+        # Volume: vàng/forex thường KHÔNG có cột volume -> tạo cột 0
+        if "volume" in df.columns:
+            df["Volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+        else:
+            df["Volume"] = 0.0
         return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-    except (requests.RequestException, ValueError, KeyError) as e:
+    except (requests.RequestException, ValueError, KeyError, TypeError) as e:
         logger.warning("TD time_series request lỗi: %s", e)
         return None

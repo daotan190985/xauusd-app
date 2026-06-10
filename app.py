@@ -530,31 +530,34 @@ def _fresh_df(ticker, tf, period, pkey, fb, live_price=None,
     Lấy DataFrame đã có chỉ báo.
 
     Ưu tiên NẾN TƯƠI:
-      - Nếu nguồn = Twelve Data + có key: lấy NẾN OHLC real-time từ Twelve Data
-        -> biểu đồ + chỉ báo đều khớp TradingView, không trễ.
-      - Nếu không: dùng yfinance (có thể vá giá tươi vào nến cuối nếu có live_price).
-    Tự fallback yfinance nếu Twelve Data lỗi.
+      - Twelve Data + key: lấy NẾN OHLC real-time -> biểu đồ + chỉ báo khớp TradingView.
+      - GoldAPI/yfinance: chỉ lấy được 1 giá tươi -> vá vào nến cuối yfinance
+        (biểu đồ vẫn dùng nến yfinance, KHÔNG khớp hoàn toàn TradingView).
 
     source/td_key/symbol_label: nếu không truyền, đọc từ session_state.
     """
     from core.analyzer import IndicatorParams, add_indicators
     from core.realtime import get_twelvedata_ohlc
-    # Đọc cấu hình nguồn từ session nếu không truyền trực tiếp
     if source is None:
         source = st.session_state.get("_src", "yfinance")
     if td_key is None:
         td_key = st.session_state.get("_tdkey", "")
     if symbol_label is None:
         symbol_label = st.session_state.get("cur_symbol", "")
+    # Giá tươi: nếu không truyền, lấy từ session (đã fetch sớm ở đầu phân tích)
+    if live_price is None:
+        live_price = st.session_state.get("_live_price")
     params = IndicatorParams(*pkey) if pkey else None
 
-    # 1) Thử lấy nến tươi từ Twelve Data
+    # 1) Twelve Data -> nến tươi thật
     if source == "twelvedata" and td_key and symbol_label:
         raw = get_twelvedata_ohlc(symbol_label, tf, td_key, outputsize=500)
         if raw is not None and not raw.empty and len(raw) > 50:
+            st.session_state["_td_ok"] = True
             return add_indicators(raw, params)
+        st.session_state["_td_ok"] = False
 
-    # 2) yfinance (mặc định / fallback)
+    # 2) yfinance + vá giá tươi vào nến cuối (GoldAPI/yfinance)
     df = get_processed_data(ticker, tf, period, pkey, fallback=fb)
     if df is None or df.empty:
         return df
@@ -622,6 +625,10 @@ def render_tab_analyzer() -> None:
         st.session_state["_tdkey"] = td_key
         if data_source == "twelvedata" and td_key:
             st.caption("📊 Biểu đồ + chỉ báo dùng NẾN TƯƠI Twelve Data (khớp TradingView)")
+        elif data_source == "goldapi" and gold_key:
+            st.warning("⚠️ GoldAPI chỉ cho giá hiện tại, KHÔNG cho nến lịch sử. "
+                       "Biểu đồ vẫn dùng nến yfinance (trễ ~15') — chỉ vá giá tươi vào "
+                       "nến cuối. **Muốn biểu đồ khớp TradingView, hãy chọn Twelve Data.**")
 
         st.divider()
         st.subheader("🔄 Tự động làm mới")
@@ -671,6 +678,8 @@ def render_tab_analyzer() -> None:
                                        twelvedata_key=td_key, goldapi_key=gold_key)
         if live_info and "price" in live_info:
             live_price = live_info["price"]
+    # Lưu vào session để MỌI biểu đồ (multi-pane) vá được giá tươi
+    st.session_state["_live_price"] = live_price
 
     # Phân tích lại khi: bấm nút HOẶC auto-refresh đang bật & đã phân tích trước đó
     should_analyze = analyze_btn or (
