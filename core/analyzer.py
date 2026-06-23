@@ -1549,3 +1549,200 @@ def trend_direction(df: pd.DataFrame) -> str:
         if price < e100 < e200:
             return "GIẢM"
     return "NGANG"
+
+
+# ============================================================================
+# LIÊN TỤC NGOÀI BAND (giai đoạn cảnh báo sớm) + soi khung lớn
+# ============================================================================
+def detect_outside_band_streak(df: pd.DataFrame, window: int = 8,
+                               min_streak: int = 3) -> dict:
+    """
+    Phát hiện chuỗi nến LIÊN TỤC NGOÀI band (%B>1 hoặc Close>BB_UP; tương tự dưới).
+    Khi giá quá mở rộng -> CHỜ điều chỉnh về band rồi test lại mới vào.
+
+    Trả về: {outside, side('top'/'bottom'), streak, pulled_back, note}
+    """
+    out = {"outside": False, "side": None, "streak": 0,
+           "pulled_back": False, "note": ""}
+    if df is None or len(df) < window or "PCT_B" not in df:
+        return out
+    sub = df.tail(window)
+    pb = sub["PCT_B"].values
+    close = sub["Close"].values
+    up = sub["BB_UP"].values if "BB_UP" in sub else [float("nan")] * len(sub)
+    low = sub["BB_LOW"].values if "BB_LOW" in sub else [float("nan")] * len(sub)
+
+    def out_top(i):
+        return (pd.notna(pb[i]) and pb[i] > 1.0) or \
+               (pd.notna(up[i]) and close[i] > up[i])
+
+    def out_bot(i):
+        return (pd.notna(pb[i]) and pb[i] < 0.0) or \
+               (pd.notna(low[i]) and close[i] < low[i])
+
+    top_s = bot_s = max_top = max_bot = 0
+    for i in range(len(sub)):
+        top_s = top_s + 1 if out_top(i) else 0
+        bot_s = bot_s + 1 if out_bot(i) else 0
+        max_top = max(max_top, top_s)
+        max_bot = max(max_bot, bot_s)
+
+    if max_top >= min_streak:
+        out.update(outside=True, side="top", streak=max_top)
+    elif max_bot >= min_streak:
+        out.update(outside=True, side="bottom", streak=max_bot)
+
+    last_pb = pb[-1]
+    if out["outside"] and pd.notna(last_pb):
+        out["pulled_back"] = (last_pb <= 1.0) if out["side"] == "top" else (last_pb >= 0.0)
+
+    if out["outside"]:
+        d = "trên" if out["side"] == "top" else "dưới"
+        if out["pulled_back"]:
+            out["note"] = (f"Đã {out['streak']} nến ngoài band {d} rồi điều chỉnh về "
+                           f"trong band — CHỜ giá test lại band để vào.")
+        else:
+            out["note"] = (f"Đang {out['streak']} nến LIÊN TỤC ngoài band {d} — giá quá "
+                           f"mở rộng, CHỜ điều chỉnh về band, CHƯA vào.")
+    return out
+
+
+def check_big_frame_resistance(frames: dict) -> list:
+    """Soi khung lớn: M15 chạm EMA100? M30/H1 chạm band trên? Trả list mô tả."""
+    notes = []
+    checks = [
+        ("15m", "EMA100", "M15 chạm EMA100", 0.003),
+        ("30m", "BB_UP", "M30 chạm band trên", 0.003),
+        ("60m", "BB_UP", "H1 chạm band trên", 0.004),
+    ]
+    for tf, col, label, tol in checks:
+        d = frames.get(tf)
+        if d is not None and not d.empty:
+            last = d.iloc[-1]
+            lvl = last.get(col)
+            if pd.notna(lvl) and lvl > 0:
+                if abs(last["Close"] - lvl) / last["Close"] <= tol:
+                    notes.append(f"{label} ({lvl:.1f}).")
+    return notes
+
+
+# ============================================================================
+# SOI LẠI 3 LỆNH GẦN NHẤT (backtest tự kiểm chứng code)
+# Quét ngược lịch sử, tìm điểm vào theo 2 loại tín hiệu:
+#   (A) test band 2-4 lần ở đỉnh/đáy   (B) %BB vượt band + Stoch/ADX hội tụ
+# Với mỗi điểm: tính kết quả N nến sau (ăn bao nhiêu pip, đúng/sai).
+# ============================================================================
+
+def backtest_recent_signals(df: pd.DataFrame, pip_size: float = 0.1,
+                            lookback: int = 200, hold_bars: int = 6,
+                            max_signals: int = 3) -> list:
+    """
+    Quét 'lookback' nến gần nhất, tìm tối đa 'max_signals' điểm vào GẦN NHẤT.
+    Đánh giá kết quả sau 'hold_bars' nến (giữ ~2-6 nến theo sở trường).
+
+    Trả về list (mới nhất trước):
+      {
+        'idx': timestamp điểm vào,
+        'direction': 'MUA'/'BÁN',
+        'kind': 'test band' / 'hội tụ %BB',
+        'entry': giá vào,
+        'exit': giá sau hold_bars nến,
+        'pips': số pip ăn được (dương=đúng, âm=sai),
+        'result': 'ĐÚNG'/'SAI',
+        'pct_b': %B tại điểm vào,
+      }
+    """
+    if df is None or len(df) < 60 or "PCT_B" not in df:
+        return []
+
+    n = len(df)
+    start = max(50, n - lookback)
+    signals = []
+    last_signal_i = -10  # tránh đếm trùng các nến sát nhau
+
+    closes = df["Close"].values
+    pb = df["PCT_B"].values
+    stoch_k = df["STOCH_K"].values if "STOCH_K" in df else [float("nan")] * n
+    dip = df["DI_PLUS"].values if "DI_PLUS" in df else [float("nan")] * n
+    dim = df["DI_MINUS"].values if "DI_MINUS" in df else [float("nan")] * n
+    idxs = df.index
+
+    # Quét từ mới -> cũ để lấy gần nhất trước
+    for i in range(n - hold_bars - 1, start, -1):
+        if len(signals) >= max_signals:
+            break
+        if i - last_signal_i < 3:  # cách nhau ít nhất 3 nến
+            continue
+        if pd.isna(pb[i]):
+            continue
+
+        direction = None
+        kind = None
+
+        # --- Loại A: test band ở biên (đỉnh/đáy) ---
+        # đếm số lần %B >=0.85 (đỉnh) hoặc <=0.15 (đáy) trong 10 nến trước i
+        w0 = max(0, i - 10)
+        seg = pb[w0:i + 1]
+        seg = seg[~pd.isna(seg)]
+        if len(seg) >= 2:
+            top_tests = _count_clusters(seg, 0.85, "top")
+            bot_tests = _count_clusters(seg, 0.15, "bottom")
+            if 2 <= top_tests <= 4 and pb[i] >= 0.85:
+                direction, kind = "BÁN", "test band"
+            elif 2 <= bot_tests <= 4 and pb[i] <= 0.15:
+                direction, kind = "MUA", "test band"
+
+        # --- Loại B: %BB vượt band + Stoch/ADX hội tụ ---
+        if direction is None:
+            if pb[i] >= 0.98:
+                # xác nhận thêm Stoch quá mua hoặc DI- mạnh
+                confirm = (pd.notna(stoch_k[i]) and stoch_k[i] > 70) or \
+                          (pd.notna(dim[i]) and pd.notna(dip[i]) and dim[i] > dip[i])
+                if confirm:
+                    direction, kind = "BÁN", "hội tụ %BB"
+            elif pb[i] <= 0.02:
+                confirm = (pd.notna(stoch_k[i]) and stoch_k[i] < 30) or \
+                          (pd.notna(dip[i]) and pd.notna(dim[i]) and dip[i] > dim[i])
+                if confirm:
+                    direction, kind = "MUA", "hội tụ %BB"
+
+        if direction is None:
+            continue
+
+        # Tính kết quả sau hold_bars nến
+        entry = closes[i]
+        exit_p = closes[min(i + hold_bars, n - 1)]
+        if direction == "MUA":
+            pips = (exit_p - entry) / pip_size
+        else:
+            pips = (entry - exit_p) / pip_size
+
+        signals.append({
+            "idx": idxs[i],
+            "direction": direction,
+            "kind": kind,
+            "entry": round(float(entry), 2),
+            "exit": round(float(exit_p), 2),
+            "pips": round(float(pips), 1),
+            "result": "ĐÚNG" if pips > 0 else "SAI",
+            "pct_b": round(float(pb[i]), 3),
+        })
+        last_signal_i = i
+
+    return signals
+
+
+def _count_clusters(seg, threshold, side):
+    """Đếm số 'cụm' chạm band trong đoạn %B (giống count_band_tests, rút gọn)."""
+    count = 0
+    armed = True
+    for v in seg:
+        is_near = (v >= threshold) if side == "top" else (v <= threshold)
+        if is_near and armed:
+            count += 1
+            armed = False
+        elif not is_near:
+            mid_back = (v < 0.6) if side == "top" else (v > 0.4)
+            if mid_back:
+                armed = True
+    return count

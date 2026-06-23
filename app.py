@@ -29,6 +29,9 @@ from core.analyzer import (
     analyze_timeframe,
     compute_reversal_zones,
     count_band_tests,
+    backtest_recent_signals,
+    check_big_frame_resistance,
+    detect_outside_band_streak,
     detect_pullback_zone,
     ema1200_scalp_signal,
     escalation_scan,
@@ -46,6 +49,7 @@ from core.charts import (
     add_fibonacci,
     add_reversal_zones,
     add_signal_arrows,
+    add_backtest_markers,
     build_full_chart,
 )
 from core.data import (
@@ -56,6 +60,7 @@ from core.data import (
     clear_raw_cache,
     get_data_until,
     get_processed_data,
+    get_symbol_config,
 )
 from core.realtime import apply_live_price, get_realtime_price
 from core.journal import (
@@ -336,6 +341,24 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
         st.warning(f"⚠️ {ctx['note']} Chưa đủ điều kiện nền (H4 cần gần/chạm band) — "
                    f"tín hiệu đếm band kém tin cậy.")
 
+    # CẢNH BÁO SỚM: liên tục ngoài band (giá quá mở rộng -> chờ điều chỉnh)
+    for tf in ["5m", "15m", "30m"]:
+        dft = frames3.get(tf)
+        if dft is None or dft.empty:
+            continue
+        ob = detect_outside_band_streak(dft)
+        if ob["outside"]:
+            big_notes = check_big_frame_resistance(frames3)
+            extra = ("<br>🔭 Khung lớn: " + " · ".join(big_notes)) if big_notes else ""
+            icon = "🟡" if not ob["pulled_back"] else "🟢"
+            st.markdown(
+                f"<div style='background:#3a2f16;border:1px solid #D4A017;color:#FFD54F;"
+                f"padding:12px;border-radius:9px;margin-bottom:6px'>"
+                f"{icon} <b>{tf} liên tục ngoài band:</b> {ob['note']}{extra}</div>",
+                unsafe_allow_html=True,
+            )
+            break  # chỉ cảnh báo khung nhỏ nhất đang ngoài band
+
     # Đếm test band cho các khung nhỏ
     test_tfs = ["60m", "30m", "15m", "5m", "1m"]
     found_entry = False
@@ -391,6 +414,50 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
                     f"({h['touches']} lần) · Entry {h.get('entry','—')} → "
                     f"Target {h.get('target','—')}"
                 )
+
+    st.divider()
+    # ===== SOI 3 LỆNH GẦN NHẤT (tự kiểm chứng code) =====
+    st.markdown("##### 🔍 Soi 3 lệnh gần nhất (kiểm chứng tín hiệu)")
+    bt_tf = st.selectbox("Khung soi lịch sử", ["5m", "15m", "30m", "60m", "1m"],
+                         index=0, key="bt_tf")
+    df_bt = frames3.get(bt_tf) if bt_tf != "1m" else df_m1_3
+    if df_bt is not None and not df_bt.empty:
+        sym_cfg = get_symbol_config(st.session_state.get("cur_symbol", ""))
+        psize = sym_cfg.get("pip", 0.1) if sym_cfg else 0.1
+        sigs = backtest_recent_signals(df_bt, pip_size=psize,
+                                       hold_bars=6, max_signals=3)
+        if sigs:
+            wins = sum(1 for s in sigs if s["result"] == "ĐÚNG")
+            total_pips = sum(s["pips"] for s in sigs)
+            st.caption(f"Tỉ lệ đúng: **{wins}/{len(sigs)}** · Tổng: "
+                       f"**{total_pips:+.0f} pip** (giữ ~6 nến)")
+            for s in sigs:
+                c = "#089981" if s["result"] == "ĐÚNG" else "#F23645"
+                mk = "✅" if s["result"] == "ĐÚNG" else "❌"
+                st.markdown(
+                    f"<div style='border-left:4px solid {c};padding:6px 10px;"
+                    f"margin-bottom:5px;background:rgba(255,255,255,0.03)'>"
+                    f"{mk} <b>{s['direction']}</b> ({s['kind']}) · "
+                    f"{s['idx'].strftime('%d/%m %H:%M')}<br>"
+                    f"Vào {s['entry']} → {s['exit']} · "
+                    f"<b style='color:{c}'>{s['pips']:+.0f} pip</b> · %B {s['pct_b']}</div>",
+                    unsafe_allow_html=True,
+                )
+            # Biểu đồ đánh dấu điểm vào
+            with st.expander("📈 Xem biểu đồ + điểm vào lệnh", expanded=False):
+                opt_bt = ChartOptions.from_selection(["EMA 200", "MACD", "%B"])
+                fig_bt = build_full_chart(
+                    df_bt, title=f"{st.session_state.get('cur_symbol','XAU/USD')} — "
+                    f"{bt_tf} (3 lệnh gần nhất)", options=opt_bt, height=480)
+                if fig_bt:
+                    add_backtest_markers(fig_bt, df_bt, sigs)
+                    st.plotly_chart(fig_bt, use_container_width=True,
+                                    config=PLOTLY_CONFIG)
+            st.caption("⚠️ Đây là backtest đơn giản (giữ cố định ~6 nến), "
+                       "chỉ để kiểm tra app bắt điểm có khớp sở trường anh không — "
+                       "không phải kết quả giao dịch thật.")
+        else:
+            st.info("Chưa tìm thấy mô hình vào lệnh nào trong lịch sử gần đây.")
 
     st.divider()
     st.markdown("##### ⚡ Scalp theo EMA1200 khung lớn")

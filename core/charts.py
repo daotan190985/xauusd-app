@@ -429,18 +429,17 @@ PLOTLY_CONFIG = {
     "scrollZoom": True,        # cuộn + pinch 2 ngón để zoom (mobile)
     "displaylogo": False,
     "modeBarButtonsToAdd": [
-        "drawline",       # Trendline / Horizontal line (giữ Shift = ngang)
+        "drawline",       # vẽ đường thẳng / trendline
         "drawopenpath",   # vẽ tự do
         "drawrect",       # vùng chữ nhật (đánh dấu range)
-        "eraseshape",     # xóa hình đã vẽ
+        "drawcircle",     # vẽ vòng tròn
+        "eraseshape",     # XÓA hình đang chọn (bấm hình rồi bấm nút này)
     ],
-    "modeBarButtonsToRemove": ["lasso2d", "select2d"],
-    "doubleClick": "reset",
-    "displayModeBar": True,
-    "responsive": True,
-    "editable": True,     # cho phép kéo/sửa hình đã vẽ (xem giá khi kéo line)
-    # Cảm ứng: cho phép pinch-zoom 2 ngón mượt như TradingView
     "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+    "doubleClick": "reset",
+    "displayModeBar": True,    # luôn hiện thanh công cụ (có nút xóa)
+    "responsive": True,
+    "editable": True,          # kéo/sửa/chọn hình đã vẽ
 }
 
 
@@ -569,4 +568,30 @@ def add_signal_arrows(fig, df, points: dict):
         for ts in points.get("adx", {}).get("buy", [])[-3:]:
             _arrow(ts, 22, True, GREEN, row_of["adx"])
 
+    return fig
+
+
+def add_backtest_markers(fig, df, signals):
+    """
+    Đánh dấu các ĐIỂM VÀO LỆNH lịch sử (từ backtest_recent_signals) lên biểu đồ giá.
+    Mỗi điểm: vòng tròn + nhãn pip (xanh nếu đúng, đỏ nếu sai).
+    """
+    if not signals:
+        return fig
+    for s in signals:
+        ts = s["idx"]
+        if ts not in df.index:
+            continue
+        win = s["result"] == "ĐÚNG"
+        color = "#089981" if win else "#F23645"
+        y = float(df.loc[ts, "Low"]) if s["direction"] == "MUA" else float(df.loc[ts, "High"])
+        ay = 36 if s["direction"] == "MUA" else -36
+        fig.add_annotation(
+            x=ts, y=y,
+            text=f"{s['direction']}<br>{s['pips']:+.0f}p",
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=2,
+            arrowcolor=color, font=dict(size=10, color=color),
+            bgcolor="rgba(0,0,0,0.6)", bordercolor=color, borderwidth=1,
+            ax=0, ay=ay, row=1, col=1,
+        )
     return fig
