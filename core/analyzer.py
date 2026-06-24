@@ -1746,3 +1746,168 @@ def _count_clusters(seg, threshold, side):
             if mid_back:
                 armed = True
     return count
+
+
+# ============================================================================
+# PHÂN TÍCH SÓNG ELLIOTT + FIBONACCI (đa khung, fractal)
+# Áp dụng cho MỌI khung. Tự dò đỉnh/đáy (swing points) -> ước lượng sóng ->
+# chiếu Fibonacci hồi (sóng 2) và mở rộng (target sóng 3).
+# LƯU Ý: đếm sóng tự động chỉ là ƯỚC LƯỢNG, không chính xác tuyệt đối.
+# ============================================================================
+
+def find_swings(df: pd.DataFrame, left: int = 3, right: int = 3,
+                lookback: int = 120) -> list:
+    """
+    Tìm các điểm xoay (swing high/low) bằng pivot: 1 nến là đỉnh nếu High của nó
+    cao hơn 'left' nến trái và 'right' nến phải (tương tự cho đáy).
+
+    Trả về list điểm theo thứ tự thời gian:
+      [{'idx', 'price', 'type': 'H'/'L', 'pos': vị trí}]
+    """
+    if df is None or len(df) < left + right + 5:
+        return []
+    sub = df.tail(lookback)
+    highs = sub["High"].values
+    lows = sub["Low"].values
+    idxs = sub.index
+    swings = []
+    n = len(sub)
+    for i in range(left, n - right):
+        # đỉnh
+        if highs[i] == max(highs[i - left:i + right + 1]):
+            swings.append({"idx": idxs[i], "price": float(highs[i]),
+                          "type": "H", "pos": i})
+        # đáy
+        elif lows[i] == min(lows[i - left:i + right + 1]):
+            swings.append({"idx": idxs[i], "price": float(lows[i]),
+                          "type": "L", "pos": i})
+    # Lọc: bỏ các swing trùng loại liên tiếp, giữ điểm cực trị hơn
+    cleaned = []
+    for s in swings:
+        if cleaned and cleaned[-1]["type"] == s["type"]:
+            # cùng loại -> giữ điểm cao hơn (đỉnh) / thấp hơn (đáy)
+            if (s["type"] == "H" and s["price"] > cleaned[-1]["price"]) or \
+               (s["type"] == "L" and s["price"] < cleaned[-1]["price"]):
+                cleaned[-1] = s
+        else:
+            cleaned.append(s)
+    return cleaned
+
+
+def analyze_elliott(df: pd.DataFrame, pip_size: float = 0.1) -> dict:
+    """
+    Ước lượng sóng Elliott từ các swing gần nhất + chiếu Fibonacci.
+
+    Logic đơn giản hoá (cho scalp đa khung):
+      - Lấy 4 swing gần nhất: tạo thành sóng 1 (đẩy), sóng 2 (hồi), đang sóng 3.
+      - Đo sóng 1, tính % hồi của sóng 2 (Fibo), dự đoán target sóng 3.
+        Sóng 3 thường >= sóng 1; mục tiêu phổ biến: 1.0x, 1.618x sóng 1.
+
+    Trả về dict với: wave_state, direction, wave1_size, retrace_pct,
+      fib_retrace_levels, wave3_targets, note.
+    """
+    out = {"ok": False, "note": "Chưa đủ swing để ước lượng sóng."}
+    swings = find_swings(df)
+    if len(swings) < 4:
+        return out
+
+    # Tìm cấu trúc sóng HỢP LỆ trong các swing gần nhất:
+    # A->B (sóng 1 đẩy), B->C (sóng 2 hồi, KHÔNG vượt quá A), C->D (sóng 3 đang chạy).
+    # Duyệt từ cuối về, lấy bộ 4 swing đầu tiên thỏa điều kiện sóng 2 < 100%.
+    A = B = C = D = None
+    for i in range(len(swings) - 1, 2, -1):
+        d, c, b, a = swings[i], swings[i-1], swings[i-2], swings[i-3]
+        w1 = abs(b["price"] - a["price"])
+        w2 = abs(b["price"] - c["price"])
+        if w1 <= 0:
+            continue
+        # sóng 2 hồi không quá 100% sóng 1 (nếu quá thì không phải sóng 2 hợp lệ)
+        # và đúng kiểu xen kẽ đỉnh-đáy
+        if w2 < w1 * 1.0 and a["type"] != b["type"]:
+            A, B, C, D = a, b, c, d
+            break
+    if A is None:
+        # không tìm được cấu trúc đẹp -> lấy 4 cuối làm ước lượng thô
+        A, B, C, D = swings[-4], swings[-3], swings[-2], swings[-1]
+
+    up = B["price"] > A["price"]
+    wave1 = abs(B["price"] - A["price"])
+    wave2 = abs(B["price"] - C["price"])
+    if wave1 <= 0:
+        return out
+    retrace = wave2 / wave1
+
+    # Mức Fibonacci hồi của sóng 2 (từ B về)
+    direction = "MUA" if up else "BÁN"
+    fib_levels = {}
+    for r in [0.382, 0.5, 0.618, 0.786]:
+        if up:
+            fib_levels[r] = B["price"] - wave1 * r
+        else:
+            fib_levels[r] = B["price"] + wave1 * r
+
+    # Target sóng 3 (từ điểm C - kết thúc sóng 2)
+    c_price = C["price"]
+    wave3_targets = {}
+    for mult in [1.0, 1.272, 1.618, 2.0]:
+        if up:
+            wave3_targets[mult] = c_price + wave1 * mult
+        else:
+            wave3_targets[mult] = c_price - wave1 * mult
+
+    # Đánh giá trạng thái: D đang ở đâu so với C (đã bắt đầu sóng 3 chưa)
+    moved = abs(D["price"] - c_price)
+    in_wave3 = moved > wave1 * 0.1  # đã đi >10% sóng 1 từ đáy sóng 2
+
+    out.update({
+        "ok": True,
+        "direction": direction,
+        "wave_state": "Đang sóng 3 (đẩy)" if in_wave3 else "Vừa xong sóng 2 (chờ sóng 3)",
+        "wave1_size": round(wave1 / pip_size, 1),  # pip
+        "wave2_size": round(wave2 / pip_size, 1),
+        "retrace_pct": round(retrace * 100, 1),
+        "fib_retrace": fib_levels,
+        "wave3_targets": wave3_targets,
+        "swing_A": A, "swing_B": B, "swing_C": C, "swing_D": D,
+        "note": (f"{'Tăng' if up else 'Giảm'}: sóng 1 ~{wave1/pip_size:.0f} pip, "
+                 f"sóng 2 hồi {retrace*100:.0f}%. "
+                 f"{'Đang đẩy sóng 3' if in_wave3 else 'Chờ sóng 3 xác nhận'}. "
+                 f"Sóng 3 thường ≥ sóng 1."),
+    })
+    return out
+
+
+def bollinger_state(df: pd.DataFrame, window: int = 20) -> dict:
+    """
+    Đánh giá BB đang MỞ RỘNG (xu hướng mạnh, theo trend) hay CO/HẸP (sắp đảo/đi ngang).
+    So bề rộng band hiện tại với trung bình 'window' nến trước.
+
+    Trả về: {state: 'mở rộng'/'co lại'/'hẹp'/'bình thường', width_now, width_avg, ratio, note}
+    """
+    out = {"state": "bình thường", "note": ""}
+    if df is None or len(df) < window + 5 or "BB_UP" not in df:
+        return out
+    width = (df["BB_UP"] - df["BB_LOW"]).tail(window + 1)
+    if width.isna().all():
+        return out
+    w_now = float(width.iloc[-1])
+    w_avg = float(width.iloc[:-1].mean())
+    if w_avg <= 0:
+        return out
+    ratio = w_now / w_avg
+
+    if ratio >= 1.15:
+        state = "mở rộng"
+        note = "BB đang MỞ RỘNG — xu hướng mạnh, theo trend (chưa đảo)."
+    elif ratio <= 0.7:
+        state = "hẹp"
+        note = "BB đang HẸP — tích lũy, chờ bùng nổ."
+    elif ratio < 0.9:
+        state = "co lại"
+        note = "BB đang CO lại — đà yếu dần, có thể sắp đạt target/đảo."
+    else:
+        state = "bình thường"
+        note = "BB bình thường."
+    out.update(state=state, width_now=round(w_now, 2),
+               width_avg=round(w_avg, 2), ratio=round(ratio, 2), note=note)
+    return out

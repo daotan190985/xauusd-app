@@ -40,6 +40,9 @@ from core.analyzer import (
     target_by_tf,
     three_tier_entry,
     trend_direction,
+    analyze_elliott,
+    bollinger_state,
+    find_swings,
 )
 from core.charts import (
     ALL_INDICATORS,
@@ -84,6 +87,90 @@ from core.pdf_export import export_report
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
+# ============================================================================
+# HỆ THỐNG GIAO DIỆN (THEME) — tùy chỉnh + lưu nhớ
+# ============================================================================
+THEMES = {
+    "Gold Terminal (tối)": {
+        "bg": "#0d1117", "panel": "#161b22", "border": "#283039",
+        "text": "#e6edf3", "muted": "#8b949e", "accent": "#e3b341",
+        "buy": "#089981", "sell": "#f23645", "neutral": "#6e7681",
+    },
+    "Midnight Blue (tối)": {
+        "bg": "#0a0e1a", "panel": "#131a2a", "border": "#22304d",
+        "text": "#e3e8f0", "muted": "#8593ad", "accent": "#4d9fff",
+        "buy": "#21c08b", "sell": "#ff4d6a", "neutral": "#5a6783",
+    },
+    "Carbon (tối)": {
+        "bg": "#111111", "panel": "#1c1c1c", "border": "#2e2e2e",
+        "text": "#ededed", "muted": "#909090", "accent": "#ff8c42",
+        "buy": "#3ddc84", "sell": "#ff5252", "neutral": "#666666",
+    },
+    "Sáng (Light)": {
+        "bg": "#f6f8fa", "panel": "#ffffff", "border": "#d0d7de",
+        "text": "#1f2328", "muted": "#656d76", "accent": "#bf8700",
+        "buy": "#1a7f37", "sell": "#cf222e", "neutral": "#6e7781",
+    },
+}
+
+FONTS = {
+    "Inter (mặc định)": "'Inter', system-ui, sans-serif",
+    "Roboto": "'Roboto', system-ui, sans-serif",
+    "IBM Plex Sans": "'IBM Plex Sans', system-ui, sans-serif",
+    "Hệ thống": "system-ui, -apple-system, sans-serif",
+}
+
+
+def get_ui_prefs() -> dict:
+    """Đọc tùy chọn giao diện từ session (mặc định nếu chưa có)."""
+    return {
+        "theme": st.session_state.get("ui_theme", "Gold Terminal (tối)"),
+        "font": st.session_state.get("ui_font", "Inter (mặc định)"),
+        "fontsize": st.session_state.get("ui_fontsize", 15),
+    }
+
+
+def inject_theme_css(prefs: dict) -> None:
+    """Áp dụng CSS theo theme + font + cỡ chữ người dùng chọn."""
+    t = THEMES.get(prefs["theme"], THEMES["Gold Terminal (tối)"])
+    font = FONTS.get(prefs["font"], FONTS["Inter (mặc định)"])
+    fs = prefs["fontsize"]
+    st.markdown(
+        f"""
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&family=Roboto:wght@400;700&family=IBM+Plex+Sans:wght@400;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+        <style>
+          :root {{
+            --bg:{t['bg']}; --panel:{t['panel']}; --border:{t['border']};
+            --text:{t['text']}; --muted:{t['muted']}; --accent:{t['accent']};
+            --buy:{t['buy']}; --sell:{t['sell']}; --neutral:{t['neutral']};
+          }}
+          .stApp {{ background:var(--bg); color:var(--text);
+                    font-family:{font}; font-size:{fs}px; }}
+          /* Tiêu đề */
+          h1,h2,h3,h4,h5 {{ font-family:{font}; letter-spacing:-0.01em; }}
+          /* Tín hiệu lớn */
+          .big-signal {{ font-size:{fs+15}px; font-weight:800; padding:16px 22px;
+                         border-radius:14px; text-align:center; margin:10px 0;
+                         letter-spacing:0.3px; box-shadow:0 4px 16px rgba(0,0,0,0.35);
+                         font-family:{font}; }}
+          .buy {{ background:linear-gradient(135deg,var(--buy),#0bbf9a); color:#fff; }}
+          .sell {{ background:linear-gradient(135deg,var(--sell),#ff6b7d); color:#fff; }}
+          .neutral {{ background:linear-gradient(135deg,var(--neutral),#8a93a3); color:#fff; }}
+          /* Thẻ chỉ số (số liệu dùng font mono cho dễ đọc) */
+          .metric-card {{ background:var(--panel); padding:12px 16px;
+                          border-radius:12px; border:1px solid var(--border); }}
+          .num {{ font-family:'JetBrains Mono', monospace; }}
+          /* Thẻ khung thời gian */
+          [data-testid="stExpander"] {{ border-radius:12px; }}
+          /* Nút bấm bo tròn, accent */
+          .stButton button {{ border-radius:10px; font-weight:600; }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 st.set_page_config(
     page_title="XAU/USD Trading Journal & Signal Analyzer",
     page_icon="🥇",
@@ -93,21 +180,41 @@ st.set_page_config(
 
 ensure_dirs()
 
-# CSS nhẹ cho giao diện đẹp hơn
-st.markdown(
-    """
-    <style>
-      .big-signal {font-size:30px;font-weight:800;padding:14px 20px;border-radius:12px;
-                   text-align:center;margin:8px 0;}
-      .buy {background:linear-gradient(135deg,#1b5e20,#43a047);color:#fff;}
-      .sell {background:linear-gradient(135deg,#b71c1c,#e53935);color:#fff;}
-      .neutral {background:linear-gradient(135deg,#37474f,#607d8b);color:#fff;}
-      .metric-card {background:#1e1e2e;padding:10px 14px;border-radius:10px;
-                    border:1px solid #333;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# Khôi phục tùy chọn giao diện đã lưu (qua URL query param) -> nhớ giữa các lần mở
+def _restore_ui_prefs():
+    try:
+        qp = st.query_params
+        if "theme" in qp and "ui_theme" not in st.session_state:
+            v = qp.get("theme")
+            if v in THEMES:
+                st.session_state["ui_theme"] = v
+        if "font" in qp and "ui_font" not in st.session_state:
+            v = qp.get("font")
+            if v in FONTS:
+                st.session_state["ui_font"] = v
+        if "fs" in qp and "ui_fontsize" not in st.session_state:
+            try:
+                st.session_state["ui_fontsize"] = int(qp.get("fs"))
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+
+
+def _save_ui_prefs():
+    """Ghi tùy chọn giao diện vào URL để lần sau mở vẫn giữ."""
+    try:
+        st.query_params["theme"] = st.session_state.get("ui_theme", "Gold Terminal (tối)")
+        st.query_params["font"] = st.session_state.get("ui_font", "Inter (mặc định)")
+        st.query_params["fs"] = str(st.session_state.get("ui_fontsize", 15))
+    except Exception:
+        pass
+
+
+_restore_ui_prefs()
+
+# Áp dụng theme người dùng đã chọn (đọc từ session, lưu nhớ qua widget key)
+inject_theme_css(get_ui_prefs())
 
 TIMEFRAMES = ["1m", "5m", "15m", "30m", "60m", "4h", "1d", "1wk"]
 
@@ -416,6 +523,59 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
                 )
 
     st.divider()
+    # ===== SÓNG ELLIOTT + FIBONACCI (đa khung) =====
+    st.markdown("##### 🌊 Phân tích sóng (Elliott + Fibonacci)")
+    ew_tf = st.selectbox("Khung phân tích sóng", ["60m", "4h", "30m", "15m", "5m"],
+                         index=0, key="ew_tf")
+    df_ew = frames3.get(ew_tf)
+    if df_ew is not None and not df_ew.empty:
+        sym_cfg = get_symbol_config(st.session_state.get("cur_symbol", ""))
+        psize = sym_cfg.get("pip", 0.1) if sym_cfg else 0.1
+
+        # Trạng thái Bollinger của khung này (mở rộng = theo trend)
+        bs = bollinger_state(df_ew)
+        if bs["state"] == "mở rộng":
+            st.markdown(
+                f"<div style='background:#1a3a2a;border:1px solid #089981;color:#7ee0c0;"
+                f"padding:11px;border-radius:9px;margin-bottom:8px'>"
+                f"📈 <b>{ew_tf}:</b> {bs['note']} (rộng gấp {bs.get('ratio','?')}× TB)</div>",
+                unsafe_allow_html=True)
+        elif bs["state"] in ("co lại", "hẹp"):
+            st.markdown(
+                f"<div style='background:#3a2f16;border:1px solid #D4A017;color:#FFD54F;"
+                f"padding:11px;border-radius:9px;margin-bottom:8px'>"
+                f"📉 <b>{ew_tf}:</b> {bs['note']}</div>",
+                unsafe_allow_html=True)
+        else:
+            st.caption(f"📊 {ew_tf}: {bs['note']}")
+
+        # Phân tích sóng Elliott
+        ell = analyze_elliott(df_ew, pip_size=psize)
+        if ell["ok"]:
+            dc = "#089981" if ell["direction"] == "MUA" else "#F23645"
+            st.markdown(
+                f"<div style='border-left:4px solid {dc};padding:8px 12px;"
+                f"background:rgba(255,255,255,0.03);border-radius:6px'>"
+                f"🌊 <b>{ell['wave_state']}</b> · hướng {ell['direction']}<br>"
+                f"Sóng 1: <b>{ell['wave1_size']:.0f} pip</b> · "
+                f"Sóng 2 hồi: <b>{ell['retrace_pct']:.0f}%</b></div>",
+                unsafe_allow_html=True)
+            # Mức Fibo hồi sóng 2
+            fib_txt = " · ".join(
+                f"{int(r*1000)/10}%: {v:.1f}" for r, v in ell["fib_retrace"].items())
+            st.caption(f"📐 Fibo hồi sóng 2: {fib_txt}")
+            # Target sóng 3
+            t3 = ell["wave3_targets"]
+            st.caption(f"🎯 Target sóng 3: 1.0×={t3[1.0]:.1f} · "
+                       f"1.618×={t3[1.618]:.1f} · 2.0×={t3[2.0]:.1f} "
+                       f"(sóng 3 thường ≥ sóng 1)")
+            st.caption(f"💡 {ell['note']}")
+        else:
+            st.info(f"🌊 {ell['note']}")
+        st.caption("⚠️ Đếm sóng là ƯỚC LƯỢNG tự động (dựa swing gần nhất), "
+                   "không chính xác tuyệt đối — dùng tham khảo, tự xác nhận bằng mắt.")
+
+    st.divider()
     # ===== SOI 3 LỆNH GẦN NHẤT (tự kiểm chứng code) =====
     st.markdown("##### 🔍 Soi 3 lệnh gần nhất (kiểm chứng tín hiệu)")
     bt_tf = st.selectbox("Khung soi lịch sử", ["5m", "15m", "30m", "60m", "1m"],
@@ -616,7 +776,25 @@ def _fresh_df(ticker, tf, period, pkey, fb, live_price=None,
         live_price = st.session_state.get("_live_price")
     params = IndicatorParams(*pkey) if pkey else None
 
-    # 1) Twelve Data -> nến tươi thật
+    # ===== CACHE THEO LẦN PHÂN TÍCH =====
+    # Cùng 1 khung được gọi nhiều nơi (phân tích, reversal, chart, backtest).
+    # Cache lại để mỗi khung chỉ GỌI MẠNG 1 LẦN -> app nhanh hơn nhiều.
+    memo = st.session_state.setdefault("_fresh_memo", {})
+    memo_key = f"{ticker}|{tf}|{source}|{symbol_label}"
+    if memo_key in memo:
+        return memo[memo_key]
+
+    result = _fresh_df_uncached(ticker, tf, period, pkey, fb, live_price,
+                               source, td_key, symbol_label, params,
+                               get_twelvedata_ohlc, add_indicators)
+    memo[memo_key] = result
+    return result
+
+
+def _fresh_df_uncached(ticker, tf, period, pkey, fb, live_price,
+                       source, td_key, symbol_label, params,
+                       get_twelvedata_ohlc, add_indicators):
+    """Phần lấy dữ liệu thật (không cache) — tách ra để cache bọc ngoài."""
     if source == "twelvedata" and td_key and symbol_label:
         raw = get_twelvedata_ohlc(symbol_label, tf, td_key, outputsize=500)
         if raw is not None and not raw.empty and len(raw) > 50:
@@ -697,6 +875,17 @@ def render_tab_analyzer() -> None:
     pkey = params.cache_key()
 
     with st.sidebar:
+        # ===== TÙY CHỈNH GIAO DIỆN (theme/font/cỡ chữ) — lưu nhớ =====
+        with st.expander("🎨 Giao diện (theme · font · cỡ chữ)", expanded=False):
+            st.selectbox("Bảng màu (theme)", list(THEMES.keys()),
+                         key="ui_theme",
+                         help="Đổi tông màu toàn app. Lựa chọn được lưu nhớ.")
+            st.selectbox("Phông chữ", list(FONTS.keys()), key="ui_font")
+            st.slider("Cỡ chữ", min_value=13, max_value=19, value=15,
+                      key="ui_fontsize")
+            _save_ui_prefs()
+            st.caption("Giao diện áp dụng ngay và được nhớ cho lần sau.")
+
         st.subheader("⚙️ Tham số phân tích")
         symbol_label = st.selectbox(
             "💱 Cặp giao dịch",
@@ -813,6 +1002,7 @@ def render_tab_analyzer() -> None:
         # LUÔN xóa cache trước khi phân tích -> lấy dữ liệu MỚI NHẤT, không bị trễ
         clear_processed_cache()
         clear_raw_cache()
+        st.session_state["_fresh_memo"] = {}  # xóa cache nến tươi của lần trước
         results = {}
         prog = st.progress(0.0, text="Đang tải & phân tích...")
         for i, tf in enumerate(selected_tfs):
