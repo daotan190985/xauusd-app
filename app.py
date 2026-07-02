@@ -42,6 +42,8 @@ from core.analyzer import (
     target_by_tf,
     three_tier_entry,
     trend_direction,
+    final_verdict,
+    multi_tf_trend,
     analyze_elliott,
     bollinger_state,
     find_swings,
@@ -360,14 +362,57 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
     st.divider()
     st.subheader("🎯 Vùng đảo chiều & Tín hiệu vào lệnh M1")
 
-    # ===== QUY LUẬT 3 TẦNG (chiến lược thực chiến) =====
-    st.markdown("##### 🏆 ĐIỂM VÀO 3 TẦNG (khung lớn + trung + M1)")
+    # Tải các khung (thêm 1d để đánh giá xu hướng dài hạn)
     frames3 = {}
-    for tf in ["4h", "60m", "30m", "15m", "5m"]:
+    for tf in ["4h", "60m", "30m", "15m", "5m", "1d"]:
         d = _fresh_df(ticker, tf, DEFAULT_PERIOD.get(tf), pkey, fb, live_price)
         if not d.empty:
             frames3[tf] = d
     df_m1_3 = _fresh_df(ticker, "1m", DEFAULT_PERIOD.get("1m"), pkey, fb, live_price)
+
+    # ===== KẾT LUẬN CUỐI CÙNG (gom mọi tiêu chí + xu hướng H1/H4/D1) =====
+    sym_cfg0 = get_symbol_config(st.session_state.get("cur_symbol", ""))
+    psize0 = sym_cfg0.get("pip", 0.1) if sym_cfg0 else 0.1
+    fv = final_verdict(frames3, df_m1_3, pip_size=psize0)
+    tr = fv["trend"]
+
+    # Màu theo quyết định
+    if fv["enter"]:
+        vbg, vbd = ("#0d3b2e", "#089981")
+    elif fv["confidence"] >= 40:
+        vbg, vbd = ("#3a2f16", "#D4A017")
+    else:
+        vbg, vbd = ("#2a2e39", "#6e7681")
+
+    st.markdown(
+        f"<div style='background:{vbg};border:2px solid {vbd};padding:16px;"
+        f"border-radius:13px;margin-bottom:6px'>"
+        f"<div style='font-size:1.25em;font-weight:800'>{fv['headline']}</div>"
+        f"<div style='margin-top:6px;opacity:0.9'>📊 Xu hướng lớn: {tr['note']}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Giá vào / Target / SL
+    if fv["direction"] and fv["entry"]:
+        ec1, ec2, ec3 = st.columns(3)
+        ec1.metric("📍 Giá vào", f"{fv['entry']}")
+        ec2.metric("🎯 Target", f"{fv['target']}")
+        ec3.metric("🛑 SL", f"{fv['sl']}")
+
+    # Lý do + cảnh báo
+    if fv["reasons"]:
+        st.markdown("**Cơ sở kết luận:** " + " · ".join(fv["reasons"]))
+    for w in fv["warnings"]:
+        st.markdown(f"<span style='color:#FFD54F'>⚠️ {w}</span>",
+                    unsafe_allow_html=True)
+    st.caption(f"Độ tin cậy tổng hợp: {fv['confidence']}%. Đây là kết luận từ TẤT CẢ "
+               "tiêu chí + đối chiếu xu hướng H4/H1/D1 (ưu tiên dài & trung hạn). "
+               "Quyết định cuối và % thắng thật là ở anh.")
+    st.divider()
+
+    # ===== QUY LUẬT 3 TẦNG (chiến lược thực chiến) =====
+    st.markdown("##### 🏆 ĐIỂM VÀO 3 TẦNG (khung lớn + trung + M1)")
     tt = three_tier_entry(frames3, df_m1_3)
 
     # 3 ô trạng thái từng tầng

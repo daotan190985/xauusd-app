@@ -1542,7 +1542,8 @@ def trend_direction(df: pd.DataFrame) -> str:
         return "NGANG"
     last = df.iloc[-1]
     price = last["Close"]
-    e100, e200 = last.get("EMA100"), last.get("EMA200")
+    e100 = last.get("EMA_100", last.get("EMA100"))
+    e200 = last.get("EMA_200", last.get("EMA200"))
     if pd.notna(e100) and pd.notna(e200):
         if price > e100 > e200:
             return "TĂNG"
@@ -2278,4 +2279,217 @@ def ripster_clouds(df: pd.DataFrame, len1_short: int = 50, len1_long: int = 55,
     out["c2_long"] = src.ewm(span=len2_long, adjust=False).mean()
     out["c1_bull"] = out["c1_short"] >= out["c1_long"]
     out["c2_bull"] = out["c2_short"] >= out["c2_long"]
+    return out
+
+
+# ============================================================================
+# KẾT LUẬN CUỐI CÙNG — gom TẤT CẢ tiêu chí, đánh giá thuận xu hướng H1/H4/D1,
+# ưu tiên xu hướng dài hạn (H4) + trung hạn (H1). Đưa ra: vào/không, hướng,
+# giá vào, target, SL, độ tin cậy.
+# ============================================================================
+
+def multi_tf_trend(frames: dict) -> dict:
+    """
+    Đánh giá xu hướng theo H1, H4, D1 + tổng hợp có trọng số.
+    Trọng số: H4 (dài hạn) = 3, H1 (trung hạn) = 2, D1 = 2, để xu hướng mạnh
+    nghiêng về dài/trung hạn theo đúng nguyên tắc thực chiến.
+
+    Trả về: {h1, h4, d1, bias('TĂNG'/'GIẢM'/'NGANG'), score, note}
+    """
+    def tr(tf):
+        d = frames.get(tf)
+        return trend_direction(d) if d is not None and not d.empty else "NGANG"
+
+    h1 = tr("60m")
+    h4 = tr("4h")
+    d1 = tr("1d")
+
+    # Chấm điểm có trọng số: H4=3, D1=2, H1=2 (dài & trung hạn ưu tiên)
+    weights = {"4h": 3, "1d": 2, "60m": 2}
+    trends = {"4h": h4, "1d": d1, "60m": h1}
+    score = 0
+    for tf, w in weights.items():
+        if trends[tf] == "TĂNG":
+            score += w
+        elif trends[tf] == "GIẢM":
+            score -= w
+
+    # Tổng hợp
+    if score >= 3:
+        bias = "TĂNG"
+    elif score <= -3:
+        bias = "GIẢM"
+    else:
+        bias = "NGANG"
+
+    note = f"H4 {h4} · H1 {h1} · D1 {d1}"
+    if bias == "TĂNG":
+        note += " → xu hướng lớn TĂNG (ưu tiên lệnh MUA)."
+    elif bias == "GIẢM":
+        note += " → xu hướng lớn GIẢM (ưu tiên lệnh BÁN)."
+    else:
+        note += " → xu hướng lớn chưa rõ (thận trọng)."
+
+    return {"h1": h1, "h4": h4, "d1": d1, "bias": bias,
+            "score": score, "note": note}
+
+
+def final_verdict(frames: dict, df_m1: pd.DataFrame,
+                  pip_size: float = 0.1) -> dict:
+    """
+    KẾT LUẬN CUỐI CÙNG — gom mọi tiêu chí thành 1 quyết định.
+
+    Gồm:
+      - 3 tầng hội tụ (three_tier_entry)
+      - test band (count_band_tests trên khung chính)
+      - liên tục ngoài band (cảnh báo sớm)
+      - sóng Elliott + BB state
+      - XU HƯỚNG H1/H4/D1 (multi_tf_trend) — trọng số dài/trung hạn
+    Đối chiếu hướng tín hiệu với xu hướng lớn -> thuận = tin cậy cao, ngược = cảnh báo.
+
+    Trả về dict: enter(bool), direction, entry, target, sl, confidence(0-100),
+      trend(dict), reasons(list), warnings(list), headline(str).
+    """
+    out = {
+        "enter": False, "direction": None, "entry": None, "target": None,
+        "sl": None, "confidence": 0, "trend": {}, "reasons": [],
+        "warnings": [], "headline": "",
+    }
+
+    # 1) Xu hướng đa khung (trọng số H4/H1/D1)
+    trend = multi_tf_trend(frames)
+    out["trend"] = trend
+
+    # 2) Ba tầng hội tụ
+    tt = three_tier_entry(frames, df_m1)
+    direction = tt.get("direction")
+    score = 0
+    reasons = []
+    warnings = []
+
+    # 3) Điểm cơ bản từ 3 tầng
+    if tt.get("entry_ready"):
+        score += 40
+        reasons.append(f"3 tầng hội tụ ({tt['score']}/3)")
+    elif tt.get("score", 0) >= 2:
+        score += 20
+        reasons.append(f"Gần hội tụ ({tt['score']}/3 tầng)")
+
+    # 4) Test band trên khung chính (5m ưu tiên, fallback 15m)
+    df_main = frames.get("5m") if frames.get("5m") is not None else frames.get("15m")
+    if df_main is not None and not df_main.empty:
+        side = "top" if direction == "BÁN" else "bottom"
+        bt = count_band_tests(df_main, side=side)
+        if bt.get("decision") == "VÀO":
+            score += 20
+            reasons.append(f"Test band {bt.get('count','?')} lần (đủ điều kiện vào)")
+        elif bt.get("count", 0) >= 1:
+            reasons.append(f"Test band {bt.get('count')} lần (chưa đủ)")
+
+    # 5) Liên tục ngoài band (cảnh báo chờ)
+    if df_main is not None and not df_main.empty:
+        ob = detect_outside_band_streak(df_main)
+        if ob.get("outside") and not ob.get("pulled_back"):
+            warnings.append("Giá liên tục ngoài band — nên CHỜ điều chỉnh về rồi mới vào")
+            score -= 10
+
+    # 6) Sóng Elliott + BB state (khung 60m)
+    df60 = frames.get("60m")
+    if df60 is not None and not df60.empty:
+        ell = analyze_elliott(df60, pip_size=pip_size)
+        if ell.get("ok"):
+            reasons.append(f"Sóng: {ell['wave_state']} ({ell['direction']})")
+            if ell["direction"] == direction:
+                score += 10
+        bs = bollinger_state(df60)
+        if bs.get("state") == "mở rộng":
+            score += 5
+            reasons.append("BB H1 mở rộng — xu hướng mạnh")
+        elif bs.get("state") in ("co lại", "hẹp"):
+            warnings.append("BB H1 co lại — đà yếu, có thể sắp đảo/đạt target")
+
+    # 7) ĐỐI CHIẾU XU HƯỚNG LỚN (quan trọng nhất)
+    if direction == "MUA" and trend["bias"] == "TĂNG":
+        score += 25
+        reasons.append("✅ THUẬN xu hướng lớn (H4/H1 TĂNG)")
+    elif direction == "BÁN" and trend["bias"] == "GIẢM":
+        score += 25
+        reasons.append("✅ THUẬN xu hướng lớn (H4/H1 GIẢM)")
+    elif direction and trend["bias"] != "NGANG":
+        score -= 20
+        warnings.append(f"⚠️ NGƯỢC xu hướng lớn ({trend['bias']}) — rủi ro cao, cân nhắc bỏ")
+
+    # Chốt độ tin cậy 0-100
+    confidence = max(0, min(100, score))
+    out["confidence"] = confidence
+    out["direction"] = direction
+    out["reasons"] = reasons
+    out["warnings"] = warnings
+
+    # Điều kiện VÀO: hội tụ đủ + thuận xu hướng + đủ tin cậy
+    enter = bool(tt.get("entry_ready") and direction and confidence >= 60)
+    # Nếu ngược xu hướng lớn -> không vào dù hội tụ
+    if direction == "MUA" and trend["bias"] == "GIẢM":
+        enter = False
+    if direction == "BÁN" and trend["bias"] == "TĂNG":
+        enter = False
+    out["enter"] = enter
+
+    # Giá vào / target / SL (dùng khung chính)
+    if direction and df_main is not None and not df_main.empty:
+        entry_price = float(df_main["Close"].iloc[-1])
+        tgt = target_by_tf("5m", entry_price, direction, df_main)
+        out["entry"] = tgt.get("entry")
+        out["target"] = tgt.get("target")
+        out["sl"] = tgt.get("sl")
+
+    # Headline
+    if enter:
+        out["headline"] = (f"✅ VÀO LỆNH {direction} — độ tin cậy {confidence}% "
+                           f"(thuận xu hướng lớn)")
+    elif direction and confidence >= 40:
+        out["headline"] = (f"⏳ CHỜ THÊM — {direction} tiềm năng "
+                           f"({confidence}%), chưa đủ điều kiện")
+    elif direction:
+        out["headline"] = f"⚠️ CHƯA VÀO — {direction} nhưng tin cậy thấp ({confidence}%)"
+    else:
+        out["headline"] = "⏸️ CHƯA CÓ TÍN HIỆU rõ ràng"
+
+    return out
+
+
+def ichimoku(df: pd.DataFrame, conv: int = 9, base: int = 26,
+             span_b: int = 52, displacement: int = 26) -> pd.DataFrame:
+    """
+    Ichimoku Cloud — khớp code Pine gốc.
+      donchian(len) = avg(lowest(len), highest(len)) = (min_low + max_high)/2
+      Conversion (Tenkan) = donchian(9)
+      Base (Kijun) = donchian(26)
+      Lead 1 (Senkou A) = avg(Conversion, Base), dịch tới +displacement
+      Lead 2 (Senkou B) = donchian(52), dịch tới +displacement
+      Lagging = Close dịch lùi -displacement
+
+    Trả về DataFrame: conversion, base, lead1, lead2, lagging (đã dịch sẵn).
+    """
+    out = pd.DataFrame(index=df.index)
+    if df is None or len(df) < span_b + displacement + 2:
+        for c in ["conversion", "base", "lead1", "lead2", "lagging"]:
+            out[c] = np.nan
+        return out
+
+    def donchian(length):
+        return (df["Low"].rolling(length).min() +
+                df["High"].rolling(length).max()) / 2
+
+    conversion = donchian(conv)
+    baseline = donchian(base)
+    lead1 = ((conversion + baseline) / 2).shift(displacement)
+    lead2 = donchian(span_b).shift(displacement)
+    lagging = df["Close"].shift(-displacement)
+
+    out["conversion"] = conversion
+    out["base"] = baseline
+    out["lead1"] = lead1
+    out["lead2"] = lead2
+    out["lagging"] = lagging
     return out

@@ -22,7 +22,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from core.analyzer import detect_band_hold, parabolic_sar, swing_labels, ravand_ma, rsi_bands, ripster_clouds
+from core.analyzer import detect_band_hold, parabolic_sar, swing_labels, ravand_ma, rsi_bands, ripster_clouds, ichimoku
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ class ChartOptions:
     ravand: bool = False         # MA đổi màu theo hướng — tắt mặc định
     rsi_bands: bool = False       # RSI Bands (LazyBear) — tắt mặc định
     ripster: bool = False         # Ripster MTF Clouds — tắt mặc định
+    ichimoku: bool = False        # Ichimoku Cloud — tắt mặc định
     scale: str = "linear"        # linear / log / percent
     lock_scale: bool = False     # True = khóa trục Y (không auto-fit khi pan/zoom)
 
@@ -114,6 +115,7 @@ class ChartOptions:
             ravand="Ravand (MA đổi màu)" in s,
             rsi_bands="RSI Bands" in s,
             ripster="Ripster Clouds (mây EMA)" in s,
+            ichimoku="Ichimoku (chỉ mây)" in s,
             scale=scale,
             lock_scale=lock_scale,
         )
@@ -129,14 +131,14 @@ ALL_INDICATORS = [
     "EMA 100", "EMA 200", "EMA 1200", "Bollinger Bands", "Keltner Channel",
     "%B", "ADX + DI", "MACD", "Stochastic + RSI",
     "Parabolic SAR", "Swing SH/SL", "Ravand (MA đổi màu)", "RSI Bands",
-    "Ripster Clouds (mây EMA)",
+    "Ripster Clouds (mây EMA)", "Ichimoku (chỉ mây)",
 ]
 
 # Nhóm indicator theo loại — để UI chọn cho gọn, tránh bật chồng chéo
 INDICATOR_GROUPS = {
     "📈 Đường trung bình (MA/EMA)": [
         "EMA 100", "EMA 200", "EMA 1200", "Ravand (MA đổi màu)",
-        "Ripster Clouds (mây EMA)",
+        "Ripster Clouds (mây EMA)", "Ichimoku (chỉ mây)",
     ],
     "📊 Kênh giá (Band/Channel)": [
         "Bollinger Bands", "Keltner Channel", "RSI Bands",
@@ -322,6 +324,27 @@ def build_full_chart(
             fig.add_trace(
                 go.Scatter(x=df.index, y=down_y, name="Ravand↓",
                            line=dict(color="#ff1744", width=3), connectgaps=False,
+                           showlegend=False),
+                row=1, col=1,
+            )
+        except Exception:
+            pass
+
+    # ---- Ichimoku Cloud — CHỈ MÂY (Senkou A/B + vùng tô), bỏ đường con ----
+    if opt.ichimoku:
+        try:
+            ic = ichimoku(df)
+            # Mây: Lead1 (Senkou A) & Lead2 (Senkou B), tô xanh/đỏ theo lead1><lead2
+            fig.add_trace(
+                go.Scatter(x=df.index, y=ic["lead1"], name="Senkou A",
+                           line=dict(color="rgba(70,153,21,0.4)", width=1),
+                           showlegend=False),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=ic["lead2"], name="Senkou B",
+                           line=dict(color="rgba(153,21,21,0.4)", width=1),
+                           fill="tonexty", fillcolor="rgba(120,120,120,0.15)",
                            showlegend=False),
                 row=1, col=1,
             )
