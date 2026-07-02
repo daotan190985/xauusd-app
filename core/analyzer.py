@@ -2395,6 +2395,8 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
 
     # 6) Sóng Elliott + BB state (khung 60m)
     elliott_conflict = False
+    pattern_info = {}
+    breakout_info = {}
     df60 = frames.get("60m")
     if df60 is not None and not df60.empty:
         ell = analyze_elliott(df60, pip_size=pip_size)
@@ -2415,6 +2417,45 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
             reasons.append("BB H1 mở rộng — xu hướng mạnh")
         elif bs.get("state") in ("co lại", "hẹp"):
             warnings.append("BB H1 co lại — đà yếu, có thể sắp đảo/đạt target")
+
+    # 6b) Mô hình sóng + phá sideway (khung 5m chính)
+    if df_main is not None and not df_main.empty:
+        pattern_info = classify_wave_pattern(df_main, pip_size=pip_size)
+        breakout_info = detect_sideway_breakout(df_main, pip_size=pip_size)
+        if pattern_info.get("pattern"):
+            reasons.append(f"Mô hình: {pattern_info['pattern']}")
+            # Sóng H / Triangle / sideway = thận trọng, chưa rõ xu hướng đẩy
+            if pattern_info["pattern"] in ("Sóng H (cân bằng)", "Triangle (tam giác)"):
+                warnings.append(f"📐 {pattern_info['note']}")
+        if breakout_info.get("sideway") and not breakout_info.get("breakout"):
+            warnings.append(f"⏸️ {breakout_info['note']}")
+        elif breakout_info.get("breakout"):
+            # Phá sideway xác nhận sóng 3 -> cấm vào ngược chiều phá
+            bdir = breakout_info["direction"]
+            reasons.append(f"✅ {breakout_info['note']}")
+            if (bdir == "TĂNG" and direction == "BÁN") or \
+               (bdir == "GIẢM" and direction == "MUA"):
+                score -= 25
+                warnings.append(f"🚫 Vừa PHÁ SIDEWAY {bdir} (sóng 3 đẩy) mà tín hiệu "
+                                f"{direction} là NGƯỢC — rất rủi ro, không nên vào.")
+
+    # 6b) Phân loại sóng + phá sideway (khung 60m + 15m)
+    df15 = frames.get("15m")
+    for tf_name, dfx in [("H1", df60), ("M15", df15)]:
+        if dfx is not None and not dfx.empty:
+            wp = classify_wave_pattern(dfx, pip_size=pip_size)
+            if wp["pattern"] and wp["pattern"] not in ("Sóng N (thường)",):
+                reasons.append(f"{tf_name} {wp['pattern']}")
+                if "cân bằng" in wp["pattern"] or "Tam giác" in wp["pattern"]:
+                    warnings.append(f"⚠️ {tf_name}: {wp['note']}")
+            sb = detect_sideway_break(dfx, pip_size=pip_size)
+            if sb["sideway"] and not sb["broke"]:
+                warnings.append(f"⏸️ {tf_name}: {sb['note']}")
+            elif sb["broke"]:
+                reasons.append(f"{tf_name}: phá sideway {sb['direction']} (sóng 3 đẩy)")
+                if (sb["direction"] == "lên" and direction == "MUA") or \
+                   (sb["direction"] == "xuống" and direction == "BÁN"):
+                    score += 10
 
     # 7) ĐỐI CHIẾU XU HƯỚNG LỚN (quan trọng nhất)
     if direction == "MUA" and trend["bias"] == "TĂNG":
@@ -2465,6 +2506,8 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
     out["enter"] = enter
     out["forbidden_by_h4"] = forbidden_by_h4
     out["elliott_conflict"] = elliott_conflict
+    out["pattern_info"] = pattern_info
+    out["breakout_info"] = breakout_info
 
     # Giá vào / target / SL (dùng khung chính)
     if direction and df_main is not None and not df_main.empty:
@@ -2560,4 +2603,271 @@ def h4_past_middle(df_h4: pd.DataFrame) -> dict:
     else:
         out.update(side="at", strong=False,
                    note="H4 quanh band giữa — chưa rõ xu hướng mạnh.")
+    return out
+
+
+# ============================================================================
+# PHÂN LOẠI MÔ HÌNH SÓNG (đo các đỉnh/đáy) — Zigzag/Flat/Triangle + sóng H/N
+# + phát hiện PHÁ SIDEWAY = xác nhận sóng 3 đẩy.
+# Tất cả dựa trên ĐO LƯỜNG khoảng cách swing (không đoán mò).
+# ============================================================================
+
+def classify_wave_pattern(df: pd.DataFrame, pip_size: float = 0.1) -> dict:
+    """
+    Phân loại mô hình sóng điều chỉnh (corrective) qua đo 3-5 swing gần nhất:
+      - Zigzag (5-3-5): A-B-C sắc nhọn, B KHÔNG vượt điểm đầu A, C phá đáy A mạnh
+      - Flat (3-3-5): đi ngang, B lên GẦN BẰNG/vượt đỉnh trước, C ~ đáy A
+      - Triangle: các swing THU HẸP dần (đỉnh thấp dần + đáy cao dần)
+      - Sóng H (Harmony): nhịp 1 ≈ nhịp 2 (chênh < 15%) → cân bằng, hay sideway
+      - Sóng N: nhịp thường, không rơi vào các loại trên
+
+    Trả về: {pattern, confidence, note, swings_used, legs}
+    """
+    out = {"pattern": None, "confidence": "thấp", "note": "",
+           "swings_used": 0, "legs": []}
+    swings = find_swings(df)
+    if len(swings) < 4:
+        out["note"] = "Chưa đủ đỉnh/đáy để phân loại mô hình."
+        return out
+
+    # Lấy 5 swing gần nhất (hoặc 4 nếu chỉ có 4)
+    pts = swings[-5:] if len(swings) >= 5 else swings[-4:]
+    out["swings_used"] = len(pts)
+
+    # Đo độ dài từng nhịp (leg) theo GIÁ
+    legs = []
+    for i in range(1, len(pts)):
+        leg = abs(pts[i]["price"] - pts[i-1]["price"])
+        legs.append(leg)
+    out["legs"] = [round(l / pip_size, 1) for l in legs]  # theo pip
+
+    if len(legs) < 2 or max(legs) <= 0:
+        out["note"] = "Nhịp sóng quá nhỏ để phân loại."
+        return out
+
+    # --- Sóng H: nhịp 1 ≈ nhịp 2 (cân bằng) ---
+    leg1, leg2 = legs[0], legs[1]
+    ratio_12 = min(leg1, leg2) / max(leg1, leg2) if max(leg1, leg2) > 0 else 0
+    is_harmony = ratio_12 >= 0.85  # chênh < 15%
+
+    # --- Triangle: các nhịp thu hẹp dần ---
+    is_triangle = False
+    if len(legs) >= 4:
+        # mỗi nhịp nhỏ hơn nhịp trước (thu hẹp)
+        shrinking = all(legs[i] < legs[i-1] * 1.05 for i in range(1, len(legs)))
+        if shrinking and legs[-1] < legs[0] * 0.7:
+            is_triangle = True
+
+    # --- Zigzag vs Flat: dựa vào B có vượt điểm đầu A không ---
+    # pts: [.., A_start, A_end(B?), ...] — với corrective A-B-C
+    # Dùng 3 điểm cuối để xét A-B-C
+    A, B, C = pts[-3], pts[-2], pts[-1]
+    is_zigzag = False
+    is_flat = False
+    # A->B là nhịp đầu, B->C nhịp hồi
+    ab = abs(B["price"] - A["price"])
+    bc = abs(C["price"] - B["price"])
+    if ab > 0:
+        retrace_bc = bc / ab
+        # Flat: hồi sâu (B về gần đỉnh cũ), đi ngang
+        if retrace_bc >= 0.8:
+            is_flat = True
+        # Zigzag: hồi vừa phải, sắc nhọn
+        elif 0.3 <= retrace_bc < 0.8:
+            is_zigzag = True
+
+    # Quyết định (ưu tiên: H (cân bằng) > Triangle > Flat > Zigzag > N)
+    if is_harmony and not is_triangle:
+        out.update(pattern="Sóng H (cân bằng)", confidence="trung bình",
+                   note=f"Nhịp 1 ≈ nhịp 2 ({leg1/pip_size:.0f} vs {leg2/pip_size:.0f} pip) "
+                        "— sóng cân bằng, hay gặp trong SIDEWAY. Thận trọng, "
+                        "chưa rõ xu hướng đẩy.")
+    elif is_triangle:
+        out.update(pattern="Triangle (tam giác)", confidence="trung bình",
+                   note="Các nhịp thu hẹp dần — mô hình tam giác, thường tích lũy "
+                        "trước khi phá vỡ tiếp xu hướng. CHỜ phá vỡ để vào.")
+    elif is_flat:
+        out.update(pattern="Flat (đi ngang)", confidence="thấp",
+                   note="A-B-C đi ngang (B hồi gần hết A) — điều chỉnh phẳng, "
+                        "thường trong xu hướng mạnh. Chờ phá vỡ theo trend chính.")
+    elif is_zigzag:
+        out.update(pattern="Zigzag (sắc nhọn)", confidence="thấp",
+                   note="A-B-C sắc nhọn — điều chỉnh nhanh. Sau zigzag thường "
+                        "tiếp tục xu hướng chính.")
+    else:
+        out.update(pattern="Sóng N (thường)", confidence="thấp",
+                   note="Nhịp thường, chưa thành mô hình đặc biệt.")
+
+    return out
+
+
+def detect_sideway_breakout(df: pd.DataFrame, window: int = 20,
+                            pip_size: float = 0.1) -> dict:
+    """
+    Phát hiện PHÁ SIDEWAY = xác nhận sóng 3 đẩy (theo lý thuyết Elliott).
+
+    Xác định vùng đi ngang (sideway) = biên độ giá hẹp trong 'window' nến,
+    rồi kiểm tra nến gần nhất có PHÁ VỠ ra khỏi vùng đó không.
+
+    Trả về: {sideway, breakout, direction, box_high, box_low, note}
+    """
+    out = {"sideway": False, "breakout": False, "direction": None,
+           "box_high": None, "box_low": None, "note": ""}
+    if df is None or len(df) < window + 3:
+        return out
+
+    # Vùng sideway = high/low của 'window' nến TRƯỚC nến cuối
+    prior = df.iloc[-(window+1):-1]
+    box_high = float(prior["High"].max())
+    box_low = float(prior["Low"].min())
+    box_range = box_high - box_low
+    if box_range <= 0:
+        return out
+
+    # Đánh giá sideway: biên độ hẹp so với ATR (dao động nhỏ = đi ngang)
+    atr = (df["High"] - df["Low"]).tail(window).mean()
+    # sideway nếu tổng range không quá lớn so với dao động từng nến
+    is_sideway = box_range < atr * window * 0.5
+
+    last = df.iloc[-1]
+    close = last["Close"]
+    out["box_high"] = round(box_high, 2)
+    out["box_low"] = round(box_low, 2)
+    out["sideway"] = is_sideway
+
+    # Phá vỡ: giá đóng cửa vượt ra ngoài box
+    if close > box_high:
+        out.update(breakout=True, direction="TĂNG",
+                   note=f"PHÁ SIDEWAY lên {box_high:.1f} — xác nhận sóng 3 đẩy TĂNG. "
+                        "Ưu tiên thuận chiều, KHÔNG bán ngược.")
+    elif close < box_low:
+        out.update(breakout=True, direction="GIẢM",
+                   note=f"PHÁ SIDEWAY xuống {box_low:.1f} — xác nhận sóng 3 đẩy GIẢM. "
+                        "Ưu tiên thuận chiều, KHÔNG mua ngược.")
+    elif is_sideway:
+        out["note"] = (f"Đang SIDEWAY trong [{box_low:.1f} - {box_high:.1f}] — "
+                       "chưa phá vỡ, CHỜ xác nhận sóng 3. Chưa nên vào.")
+    return out
+
+
+# ============================================================================
+# PHÂN LOẠI SÓNG THEO ĐO ĐỈNH/ĐÁY (N/H/I + Zigzag/Flat/Triangle + phá sideway)
+# Dựa trên find_swings, đo độ dài các nhịp -> phân loại theo NGƯỠNG rõ ràng.
+# Không đoán mò: mọi kết luận đều từ số đo cụ thể + có độ tin cậy.
+# ============================================================================
+
+def classify_wave_pattern(df: pd.DataFrame, pip_size: float = 0.1) -> dict:
+    """
+    Phân loại sóng dựa trên đo các swing gần nhất.
+
+    - Sóng H (Harmony): nhịp 1 ≈ nhịp 2 (chênh < 15%) -> cân bằng, thường sideway
+    - Zigzag: B không vượt đỉnh A (retrace < 90%), C phá đáy -> điều chỉnh sắc nhọn
+    - Flat: B lên gần/vượt đỉnh (retrace 90-105%) -> đi ngang
+    - Triangle: các swing thu hẹp dần (mỗi nhịp nhỏ hơn nhịp trước)
+
+    Trả về: {pattern, confidence, note, legs(list độ dài các nhịp)}
+    """
+    out = {"pattern": None, "confidence": 0, "note": "", "legs": []}
+    swings = find_swings(df)
+    if len(swings) < 4:
+        out["note"] = "Chưa đủ swing để phân loại sóng."
+        return out
+
+    # Lấy các nhịp gần nhất (độ dài mỗi nhịp = |giá swing[i] - swing[i-1]|)
+    pts = swings[-5:] if len(swings) >= 5 else swings[-4:]
+    legs = []
+    for i in range(1, len(pts)):
+        legs.append(abs(pts[i]["price"] - pts[i-1]["price"]))
+    out["legs"] = [round(l / pip_size, 1) for l in legs]  # theo pip
+
+    if len(legs) < 3:
+        out["note"] = "Chưa đủ nhịp."
+        return out
+
+    leg1, leg2, leg3 = legs[-3], legs[-2], legs[-1]
+    if leg1 <= 0:
+        return out
+
+    # --- Sóng H: nhịp 1 ≈ nhịp 2 (cân bằng) ---
+    ratio_12 = leg2 / leg1 if leg1 else 0
+    if 0.85 <= ratio_12 <= 1.15:
+        out.update(pattern="Sóng H (cân bằng)", confidence=70,
+                   note=f"Nhịp 1 ≈ nhịp 2 ({out['legs'][-3]} ≈ {out['legs'][-2]} pip) "
+                        f"— sóng cân bằng, thường trong SIDEWAY/điều chỉnh. "
+                        f"Chưa phải sóng đẩy, THẬN TRỌNG.")
+        return out
+
+    # --- Triangle: các nhịp thu hẹp dần ---
+    if leg1 > leg2 > leg3 and leg3 < leg1 * 0.7:
+        out.update(pattern="Tam giác (Triangle)", confidence=60,
+                   note=f"Các nhịp thu hẹp dần ({out['legs'][-3]}→{out['legs'][-2]}"
+                        f"→{out['legs'][-1]} pip) — mô hình TÍCH LŨY, "
+                        f"chờ phá vỡ (breakout) mới vào.")
+        return out
+
+    # --- Zigzag vs Flat: dựa mức retrace của nhịp giữa ---
+    # nhịp 2 là retrace của nhịp 1
+    retrace = leg2 / leg1
+    if retrace < 0.9:
+        out.update(pattern="Zigzag (điều chỉnh sắc)", confidence=55,
+                   note=f"Nhịp 2 hồi {retrace*100:.0f}% nhịp 1 — điều chỉnh SẮC NHỌN "
+                        f"(zigzag). Theo luân phiên, nhịp điều chỉnh sau có thể đi ngang.")
+    elif 0.9 <= retrace <= 1.05:
+        out.update(pattern="Flat (đi ngang)", confidence=55,
+                   note=f"Nhịp 2 hồi ~{retrace*100:.0f}% nhịp 1 — điều chỉnh ĐI NGANG "
+                        f"(flat). Thường trong xu hướng mạnh, chờ tiếp diễn.")
+    else:
+        out.update(pattern="Sóng N (thường)", confidence=40,
+                   note="Nhịp không cân bằng rõ — sóng thường (neutral).")
+    return out
+
+
+def detect_sideway_break(df: pd.DataFrame, window: int = 20,
+                         pip_size: float = 0.1) -> dict:
+    """
+    Phát hiện vùng SIDEWAY và giá PHÁ VỠ (breakout) = xác nhận sóng 3 đẩy.
+
+    Sideway = giá dao động trong biên hẹp (range < ngưỡng) 'window' nến.
+    Phá vỡ = nến gần nhất đóng cửa vượt khỏi biên trên/dưới của vùng sideway.
+
+    Trả về: {sideway, broke, direction('lên'/'xuống'), range_pips, note}
+    """
+    out = {"sideway": False, "broke": False, "direction": None,
+           "range_pips": 0, "note": ""}
+    if df is None or len(df) < window + 2:
+        return out
+
+    # Vùng sideway: xét window nến TRƯỚC nến cuối (không tính nến cuối)
+    prior = df.iloc[-(window+1):-1]
+    hi = prior["High"].max()
+    lo = prior["Low"].min()
+    rng = hi - lo
+    rng_pips = rng / pip_size
+
+    # Biên độ trung bình 1 nến để so sánh (sideway = range nhỏ)
+    avg_candle = (df["High"] - df["Low"]).tail(window).mean()
+    if avg_candle <= 0:
+        return out
+    # Sideway nếu range window nhỏ so với biến động (dao động hẹp)
+    # Dùng 2 điều kiện: range < 6x biên nến TB HOẶC range < 0.8% giá
+    price_now = df["Close"].iloc[-1]
+    is_sideway = (rng < avg_candle * 6.0) or (rng < price_now * 0.008)
+    out["sideway"] = bool(is_sideway)
+    out["range_pips"] = round(rng_pips, 1)
+
+    last_close = df["Close"].iloc[-1]
+    if is_sideway:
+        if last_close > hi:
+            out.update(broke=True, direction="lên",
+                       note=f"PHÁ SIDEWAY LÊN (vượt {hi:.1f}) — xác nhận sóng 3 đẩy "
+                            f"TĂNG. Vùng tích lũy {rng_pips:.0f} pip.")
+        elif last_close < lo:
+            out.update(broke=True, direction="xuống",
+                       note=f"PHÁ SIDEWAY XUỐNG (thủng {lo:.1f}) — xác nhận sóng 3 đẩy "
+                            f"GIẢM. Vùng tích lũy {rng_pips:.0f} pip.")
+        else:
+            out["note"] = (f"Đang SIDEWAY (biên {lo:.1f}–{hi:.1f}, {rng_pips:.0f} pip) "
+                           f"— CHỜ phá vỡ mới vào, chưa có sóng đẩy.")
+    else:
+        out["note"] = "Không trong vùng sideway rõ."
     return out

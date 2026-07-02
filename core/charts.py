@@ -753,3 +753,34 @@ def add_backtest_markers(fig, df, signals):
             ax=0, ay=ay, row=1, col=1,
         )
     return fig
+
+
+def add_wave_pattern_overlay(fig, df, pip_size=0.1):
+    """
+    Vẽ overlay phân loại sóng + vùng sideway lên biểu đồ giá (row 1).
+    - Vùng sideway: hình chữ nhật mờ + nhãn
+    - Nhãn mô hình sóng ở góc
+    """
+    from core.analyzer import classify_wave_pattern, detect_sideway_break
+    try:
+        sb = detect_sideway_break(df, pip_size=pip_size)
+        if sb.get("sideway"):
+            # Vẽ vùng sideway (window 20 nến trước nến cuối)
+            window = 20
+            if len(df) > window + 1:
+                prior = df.iloc[-(window+1):-1]
+                hi = prior["High"].max()
+                lo = prior["Low"].min()
+                x0 = prior.index[0]
+                x1 = df.index[-1]
+                color = "rgba(212,160,23,0.12)" if not sb.get("broke") else "rgba(8,153,129,0.12)"
+                fig.add_shape(type="rect", x0=x0, x1=x1, y0=lo, y1=hi,
+                              fillcolor=color, line=dict(width=0),
+                              row=1, col=1, layer="below")
+                label = "SIDEWAY" if not sb.get("broke") else f"PHÁ {sb['direction'].upper()}"
+                fig.add_annotation(x=x1, y=hi, text=label, showarrow=False,
+                                   yshift=10, font=dict(size=9, color="#D4A017"),
+                                   row=1, col=1)
+    except Exception:
+        pass
+    return fig

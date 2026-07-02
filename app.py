@@ -406,8 +406,23 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
     for w in fv["warnings"]:
         st.markdown(f"<span style='color:#FFD54F'>⚠️ {w}</span>",
                     unsafe_allow_html=True)
+
+    # Mô hình sóng + trạng thái phá sideway (nếu phát hiện)
+    pinfo = fv.get("pattern_info", {})
+    binfo = fv.get("breakout_info", {})
+    if pinfo.get("pattern") or binfo.get("sideway"):
+        parts = []
+        if pinfo.get("pattern"):
+            parts.append(f"🌊 Mô hình: **{pinfo['pattern']}** ({pinfo.get('confidence','?')})")
+        if binfo.get("breakout"):
+            parts.append(f"💥 Đã phá sideway {binfo['direction']}")
+        elif binfo.get("sideway"):
+            parts.append("⏸️ Đang sideway (chờ phá vỡ = sóng 3)")
+        st.info(" · ".join(parts))
+
     st.caption(f"Độ tin cậy tổng hợp: {fv['confidence']}%. Đây là kết luận từ TẤT CẢ "
                "tiêu chí + đối chiếu xu hướng H4/H1/D1 (ưu tiên dài & trung hạn). "
+               "Mô hình sóng là ƯỚC LƯỢNG (đo swing) — tham khảo, tự xác nhận. "
                "Quyết định cuối và % thắng thật là ở anh.")
     st.divider()
 
@@ -637,7 +652,30 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
             st.caption(f"💡 {ell['note']}")
         else:
             st.info(f"🌊 {ell['note']}")
-        st.caption("⚠️ Đếm sóng là ƯỚC LƯỢNG tự động (dựa swing gần nhất), "
+
+        # Phân loại mô hình sóng (N/H/Zigzag/Flat/Triangle) + phá sideway
+        from core.analyzer import classify_wave_pattern, detect_sideway_break
+        wp = classify_wave_pattern(df_ew, pip_size=psize)
+        sb = detect_sideway_break(df_ew, pip_size=psize)
+        if wp["pattern"]:
+            pc = "#D4A017" if ("cân bằng" in wp["pattern"] or "Tam giác" in wp["pattern"]) else "#4d9fff"
+            st.markdown(
+                f"<div style='border-left:4px solid {pc};padding:8px 12px;margin-top:6px;"
+                f"background:rgba(255,255,255,0.03);border-radius:6px'>"
+                f"📐 <b>Mô hình: {wp['pattern']}</b> (tin cậy {wp['confidence']}%)<br>"
+                f"<span style='opacity:0.85'>{wp['note']}</span><br>"
+                f"Độ dài các nhịp (pip): {wp['legs']}</div>",
+                unsafe_allow_html=True)
+        # Trạng thái sideway / phá vỡ
+        if sb["sideway"] and not sb["broke"]:
+            st.markdown(f"<span style='color:#FFD54F'>⏸️ {sb['note']}</span>",
+                        unsafe_allow_html=True)
+        elif sb["broke"]:
+            bc = "#089981" if sb["direction"] == "lên" else "#F23645"
+            st.markdown(f"<span style='color:{bc};font-weight:600'>🚀 {sb['note']}</span>",
+                        unsafe_allow_html=True)
+
+        st.caption("⚠️ Đếm sóng & phân loại mô hình là ƯỚC LƯỢNG tự động (dựa đo swing), "
                    "không chính xác tuyệt đối — dùng tham khảo, tự xác nhận bằng mắt.")
 
     st.divider()
