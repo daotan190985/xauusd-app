@@ -2486,6 +2486,23 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
         warnings.append(f"🚫 {h4_mid['note']} (Đây đúng kiểu lệnh dễ THUA: "
                         f"giá vượt band khung nhỏ nhưng H4 đang xu hướng mạnh.)")
 
+    # 9) RULE STOCH (42,5,3) CẮT — động lượng chuyển hướng (khung M5 chính)
+    #    %K cắt lên %D = ưu tiên MUA + cấm bán ngược; ngược lại cho SELL.
+    stoch_forbid = False
+    if df_main is not None and not df_main.empty:
+        sc = stoch_cross(df_main)
+        if sc["cross"]:
+            reasons.append(f"Stoch {sc['favor_direction']} ({sc['cross']}: %K {'cắt lên' if sc['cross']=='up' else 'cắt xuống'} %D)")
+            if sc["favor_direction"] == direction:
+                score += 15  # thuận động lượng Stoch
+            elif direction and sc["favor_direction"] != direction:
+                # Tín hiệu NGƯỢC động lượng Stoch -> cảnh báo + cấm
+                stoch_forbid = True
+                score -= 20
+                warnings.append(
+                    f"🚫 NGƯỢC ĐỘNG LƯỢNG STOCH — {sc['note']} "
+                    f"(Tín hiệu {direction} đi ngược Stoch, dễ THUA.)")
+
     # Chốt độ tin cậy 0-100
     confidence = max(0, min(100, score))
     out["confidence"] = confidence
@@ -2503,8 +2520,12 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
     # CẤM TUYỆT ĐỐI nếu H4 qua band giữa + tín hiệu ngược (rule chống thua)
     if forbidden_by_h4:
         enter = False
+    # CẤM nếu ngược động lượng Stoch (42,5,3) cắt
+    if stoch_forbid:
+        enter = False
     out["enter"] = enter
     out["forbidden_by_h4"] = forbidden_by_h4
+    out["stoch_forbid"] = stoch_forbid
     out["elliott_conflict"] = elliott_conflict
     out["pattern_info"] = pattern_info
     out["breakout_info"] = breakout_info
@@ -2870,4 +2891,52 @@ def detect_sideway_break(df: pd.DataFrame, window: int = 20,
                            f"— CHỜ phá vỡ mới vào, chưa có sóng đẩy.")
     else:
         out["note"] = "Không trong vùng sideway rõ."
+    return out
+
+
+def stoch_cross(df: pd.DataFrame, lookback: int = 3) -> dict:
+    """
+    Phát hiện Stochastic (42,5,3) %K cắt %D — động lượng chuyển hướng.
+    Với chu kỳ 42 (chậm, mượt): chỉ cần 2-3 nến tăng/test là %K cắt lên %D.
+
+    - %K cắt LÊN %D (giao cắt tăng) = động lượng LÊN -> ưu tiên MUA, cấm bán ngược
+    - %K cắt XUỐNG %D (giao cắt giảm) = động lượng XUỐNG -> ưu tiên BÁN, cấm mua ngược
+
+    Trả về: {cross('up'/'down'/None), favor_direction('MUA'/'BÁN'/None),
+             k, d, note}
+    """
+    out = {"cross": None, "favor_direction": None, "k": None, "d": None, "note": ""}
+    if df is None or len(df) < lookback + 2 or "STOCH_K" not in df or "STOCH_D" not in df:
+        return out
+    k = df["STOCH_K"]
+    d = df["STOCH_D"]
+    if k.isna().all() or d.isna().all():
+        return out
+
+    k_now, d_now = k.iloc[-1], d.iloc[-1]
+    out["k"] = round(float(k_now), 1) if pd.notna(k_now) else None
+    out["d"] = round(float(d_now), 1) if pd.notna(d_now) else None
+
+    # Tìm điểm cắt trong 'lookback' nến gần nhất
+    cross = None
+    for i in range(1, min(lookback + 1, len(df))):
+        k0, k1 = k.iloc[-i-1], k.iloc[-i]
+        d0, d1 = d.iloc[-i-1], d.iloc[-i]
+        if pd.isna(k0) or pd.isna(k1) or pd.isna(d0) or pd.isna(d1):
+            continue
+        if k0 <= d0 and k1 > d1:   # %K cắt lên %D
+            cross = "up"
+            break
+        if k0 >= d0 and k1 < d1:   # %K cắt xuống %D
+            cross = "down"
+            break
+
+    if cross == "up":
+        out.update(cross="up", favor_direction="MUA",
+                   note=f"Stoch %K cắt LÊN %D ({out['k']}>{out['d']}) — động lượng "
+                        f"chuyển LÊN, ưu tiên MUA, tránh bán ngược.")
+    elif cross == "down":
+        out.update(cross="down", favor_direction="BÁN",
+                   note=f"Stoch %K cắt XUỐNG %D ({out['k']}<{out['d']}) — động lượng "
+                        f"chuyển XUỐNG, ưu tiên BÁN, tránh mua ngược.")
     return out
