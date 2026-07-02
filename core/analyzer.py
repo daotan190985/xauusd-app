@@ -2394,6 +2394,7 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
             score -= 10
 
     # 6) Sóng Elliott + BB state (khung 60m)
+    elliott_conflict = False
     df60 = frames.get("60m")
     if df60 is not None and not df60.empty:
         ell = analyze_elliott(df60, pip_size=pip_size)
@@ -2401,6 +2402,13 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
             reasons.append(f"Sóng: {ell['wave_state']} ({ell['direction']})")
             if ell["direction"] == direction:
                 score += 10
+            elif direction and ell["direction"] != direction:
+                # Tín hiệu NGƯỢC chiều sóng Elliott -> cảnh báo ngay
+                elliott_conflict = True
+                score -= 15
+                warnings.append(
+                    f"⚠️ NGƯỢC SÓNG ELLIOTT — sóng đang đẩy {ell['direction']}, "
+                    f"tín hiệu {direction} là bắt ngược sóng, RỦI RO CAO.")
         bs = bollinger_state(df60)
         if bs.get("state") == "mở rộng":
             score += 5
@@ -2419,6 +2427,24 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
         score -= 20
         warnings.append(f"⚠️ NGƯỢC xu hướng lớn ({trend['bias']}) — rủi ro cao, cân nhắc bỏ")
 
+    # 8) RULE H4 QUA BAND GIỮA — cấm bán/mua ngược xu hướng mạnh
+    #    (chỉ khi tín hiệu là %B vượt hẳn band = liên tục ngoài band)
+    h4_mid = h4_past_middle(frames.get("4h"))
+    forbidden_by_h4 = False
+    # Kiểm tra tín hiệu có phải kiểu "%B vượt hẳn band" không
+    signal_outside_band = False
+    if df_main is not None and not df_main.empty and "PCT_B" in df_main:
+        last_pb = df_main["PCT_B"].iloc[-1]
+        if pd.notna(last_pb) and (last_pb > 1.0 or last_pb < 0.0):
+            signal_outside_band = True
+
+    if (h4_mid["strong"] and h4_mid["forbid_direction"] == direction
+            and signal_outside_band):
+        forbidden_by_h4 = True
+        score -= 30
+        warnings.append(f"🚫 {h4_mid['note']} (Đây đúng kiểu lệnh dễ THUA: "
+                        f"giá vượt band khung nhỏ nhưng H4 đang xu hướng mạnh.)")
+
     # Chốt độ tin cậy 0-100
     confidence = max(0, min(100, score))
     out["confidence"] = confidence
@@ -2433,7 +2459,12 @@ def final_verdict(frames: dict, df_m1: pd.DataFrame,
         enter = False
     if direction == "BÁN" and trend["bias"] == "TĂNG":
         enter = False
+    # CẤM TUYỆT ĐỐI nếu H4 qua band giữa + tín hiệu ngược (rule chống thua)
+    if forbidden_by_h4:
+        enter = False
     out["enter"] = enter
+    out["forbidden_by_h4"] = forbidden_by_h4
+    out["elliott_conflict"] = elliott_conflict
 
     # Giá vào / target / SL (dùng khung chính)
     if direction and df_main is not None and not df_main.empty:
@@ -2492,4 +2523,41 @@ def ichimoku(df: pd.DataFrame, conv: int = 9, base: int = 26,
     out["lead1"] = lead1
     out["lead2"] = lead2
     out["lagging"] = lagging
+    return out
+
+
+def h4_past_middle(df_h4: pd.DataFrame) -> dict:
+    """
+    Kiểm tra H4 đã VƯỢT QUA band GIỮA chưa -> xác định xu hướng mạnh.
+
+    - Giá H4 > band giữa (BB_MID) = xu hướng TĂNG mạnh -> cấm BÁN ngược
+    - Giá H4 < band giữa = xu hướng GIẢM mạnh -> cấm MUA ngược
+
+    Trả về: {side('above'/'below'/'at'), strong(bool), forbid_direction, note}
+      forbid_direction: hướng lệnh BỊ CẤM ('BÁN' nếu H4 trên giữa, 'MUA' nếu dưới)
+    """
+    out = {"side": "at", "strong": False, "forbid_direction": None, "note": ""}
+    if df_h4 is None or df_h4.empty or "BB_MID" not in df_h4:
+        return out
+    last = df_h4.iloc[-1]
+    price = last["Close"]
+    mid = last.get("BB_MID")
+    if pd.isna(mid):
+        return out
+
+    # Khoảng cách tương đối so với band giữa
+    dist = (price - mid) / mid if mid else 0
+    thresh = 0.001  # 0.1% để tránh nhiễu sát band giữa
+
+    if dist > thresh:
+        out.update(side="above", strong=True, forbid_direction="BÁN",
+                   note="H4 đã vượt LÊN band giữa — xu hướng TĂNG mạnh, "
+                        "CẤM bán ngược khi %B vượt band khung nhỏ.")
+    elif dist < -thresh:
+        out.update(side="below", strong=True, forbid_direction="MUA",
+                   note="H4 đã xuống DƯỚI band giữa — xu hướng GIẢM mạnh, "
+                        "CẤM mua ngược khi %B vượt band khung nhỏ.")
+    else:
+        out.update(side="at", strong=False,
+                   note="H4 quanh band giữa — chưa rõ xu hướng mạnh.")
     return out
