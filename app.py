@@ -937,6 +937,23 @@ def _fresh_df(ticker, tf, period, pkey, fb, live_price=None,
         live_price = st.session_state.get("_live_price")
     params = IndicatorParams(*pkey) if pkey else None
 
+    # ===== CHẾ ĐỘ PHÂN TÍCH QUÁ KHỨ =====
+    # Nếu người dùng chọn mốc thời gian -> cắt dữ liệu tới đúng lúc đó
+    # (không nhìn tương lai). Nếu không -> phân tích thời gian thực như thường.
+    bt_time = st.session_state.get("_backtest_time")
+    if bt_time is not None:
+        from core.data import get_data_until
+        memo = st.session_state.setdefault("_fresh_memo", {})
+        memo_key = f"HIST|{ticker}|{tf}|{bt_time}"
+        if memo_key in memo:
+            return memo[memo_key]
+        try:
+            result = get_data_until(ticker, tf, pd.Timestamp(bt_time), period)
+        except Exception:
+            result = None
+        memo[memo_key] = result
+        return result
+
     # ===== CACHE THEO LẦN PHÂN TÍCH =====
     # Cùng 1 khung được gọi nhiều nơi (phân tích, reversal, chart, backtest).
     # Cache lại để mỗi khung chỉ GỌI MẠNG 1 LẦN -> app nhanh hơn nhiều.
@@ -1062,6 +1079,31 @@ def render_tab_analyzer() -> None:
         )
         analyze_btn = st.button("🚀 Phân tích ngay", type="primary",
                                 use_container_width=True)
+
+        # ===== CHẾ ĐỘ PHÂN TÍCH QUÁ KHỨ (tùy chọn) =====
+        with st.expander("🕐 Phân tích tại thời điểm quá khứ (tùy chọn)",
+                         expanded=False):
+            st.caption("Để trống = phân tích thời gian thực. Bật để phân tích "
+                       "như đang đứng tại một mốc quá khứ (không nhìn tương lai).")
+            use_hist = st.toggle("Bật chế độ quá khứ", value=False,
+                                 key="use_hist_mode")
+            if use_hist:
+                import datetime as _dt
+                cA, cB = st.columns(2)
+                hist_date = cA.date_input(
+                    "Ngày", value=_dt.date.today() - _dt.timedelta(days=1),
+                    key="hist_date")
+                hist_time = cB.time_input(
+                    "Giờ (theo giờ VN)", value=_dt.time(20, 0), key="hist_time")
+                # Ghép ngày + giờ, đổi từ giờ VN (UTC+7) sang UTC để cắt data
+                local_dt = _dt.datetime.combine(hist_date, hist_time)
+                utc_dt = local_dt - _dt.timedelta(hours=7)  # VN -> UTC
+                st.session_state["_backtest_time"] = utc_dt
+                st.info(f"⏳ Đang phân tích tại: **{local_dt.strftime('%d/%m/%Y %H:%M')}** "
+                        f"(giờ VN). Dữ liệu M1 có thể thiếu ở quá khứ xa — "
+                        f"M15/M5 thường vẫn đủ.")
+            else:
+                st.session_state["_backtest_time"] = None
 
         # ===== NGUỒN DỮ LIỆU REAL-TIME =====
         st.divider()
