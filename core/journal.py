@@ -218,3 +218,49 @@ def method_performance(df: pd.DataFrame) -> pd.DataFrame:
     if not out.empty:
         out = out.sort_values("winrate", ascending=False).reset_index(drop=True)
     return out
+
+
+# ============================================================================
+# LƯU LỊCH SỬ BÁO CÁO ĐÁNH GIÁ PHƯƠNG PHÁP (file JSON nhẹ)
+# ============================================================================
+REPORT_JSON = DATA_DIR / "method_reports.json"
+
+
+def save_method_report(report: dict) -> bool:
+    """Lưu 1 báo cáo đánh giá vào lịch sử (JSON). Giữ tối đa 50 báo cáo gần nhất."""
+    import json
+    ensure_dirs()
+    try:
+        reports = load_method_reports()
+        reports.insert(0, report)  # mới nhất lên đầu
+        reports = reports[:50]
+        with open(REPORT_JSON, "w", encoding="utf-8") as f:
+            json.dump(reports, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        logging.warning("Lưu báo cáo lỗi: %s", e)
+        return False
+
+
+def load_method_reports() -> list:
+    """Đọc danh sách báo cáo đã lưu (mới nhất trước)."""
+    import json
+    if not REPORT_JSON.exists():
+        return []
+    try:
+        with open(REPORT_JSON, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def delete_method_report(created_at: str) -> bool:
+    """Xóa 1 báo cáo theo thời gian tạo."""
+    import json
+    try:
+        reports = [r for r in load_method_reports() if r.get("created_at") != created_at]
+        with open(REPORT_JSON, "w", encoding="utf-8") as f:
+            json.dump(reports, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False

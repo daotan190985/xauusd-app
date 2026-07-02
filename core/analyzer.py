@@ -1658,7 +1658,7 @@ def backtest_recent_signals(df: pd.DataFrame, pip_size: float = 0.1,
     n = len(df)
     start = max(50, n - lookback)
     signals = []
-    last_signal_i = -10  # tránh đếm trùng các nến sát nhau
+    last_signal_i = None  # vị trí lệnh gần nhất (quét ngược)
 
     closes = df["Close"].values
     pb = df["PCT_B"].values
@@ -1671,7 +1671,7 @@ def backtest_recent_signals(df: pd.DataFrame, pip_size: float = 0.1,
     for i in range(n - hold_bars - 1, start, -1):
         if len(signals) >= max_signals:
             break
-        if i - last_signal_i < 3:  # cách nhau ít nhất 3 nến
+        if last_signal_i is not None and last_signal_i - i < 3:  # cách nhau ít nhất 3 nến
             continue
         if pd.isna(pb[i]):
             continue
@@ -1910,4 +1910,372 @@ def bollinger_state(df: pd.DataFrame, window: int = 20) -> dict:
         note = "BB bình thường."
     out.update(state=state, width_now=round(w_now, 2),
                width_avg=round(w_avg, 2), ratio=round(ratio, 2), note=note)
+    return out
+
+
+# ============================================================================
+# BÁO CÁO ĐÁNH GIÁ ĐỘ TIN CẬY PHƯƠNG PHÁP
+# Quét N lệnh gần nhất, gắn các tiêu chí active mỗi lệnh, tính tỉ lệ thắng +
+# pip trung bình theo từng tiêu chí -> khuyến nghị tiêu chí nào đáng tin.
+# ============================================================================
+
+def backtest_with_criteria(df: pd.DataFrame, pip_size: float = 0.1,
+                           lookback: int = 400, hold_bars: int = 6,
+                           max_signals: int = 10) -> list:
+    """
+    Như backtest_recent_signals nhưng quét NHIỀU lệnh hơn (mặc định 10) và
+    GẮN các tiêu chí active tại mỗi điểm vào (để đánh giá tiêu chí nào hiệu quả).
+
+    Mỗi lệnh kèm 'criteria': dict {tên tiêu chí: True/False}.
+    """
+    if df is None or len(df) < 80 or "PCT_B" not in df:
+        return []
+    n = len(df)
+    start = max(60, n - lookback)
+    out = []
+    last_i = None  # vị trí lệnh gần nhất đã ghi (quét ngược)
+
+    closes = df["Close"].values
+    pb = df["PCT_B"].values
+    sk = df["STOCH_K"].values if "STOCH_K" in df else [float("nan")] * n
+    sd = df["STOCH_D"].values if "STOCH_D" in df else [float("nan")] * n
+    dip = df["DI_PLUS"].values if "DI_PLUS" in df else [float("nan")] * n
+    dim = df["DI_MINUS"].values if "DI_MINUS" in df else [float("nan")] * n
+    macd = df["MACD_HIST"].values if "MACD_HIST" in df else [float("nan")] * n
+    adx = df["ADX"].values if "ADX" in df else [float("nan")] * n
+    idxs = df.index
+
+    for i in range(n - hold_bars - 1, start, -1):
+        if len(out) >= max_signals:
+            break
+        if (last_i is not None and last_i - i < 3) or pd.isna(pb[i]):
+            continue
+
+        direction = None
+        w0 = max(0, i - 10)
+        seg = [x for x in pb[w0:i + 1] if pd.notna(x)]
+        top_tests = _count_clusters(seg, 0.85, "top") if len(seg) >= 2 else 0
+        bot_tests = _count_clusters(seg, 0.15, "bottom") if len(seg) >= 2 else 0
+
+        if 2 <= top_tests <= 4 and pb[i] >= 0.85:
+            direction = "BÁN"
+        elif 2 <= bot_tests <= 4 and pb[i] <= 0.15:
+            direction = "MUA"
+        elif pb[i] >= 0.98:
+            direction = "BÁN"
+        elif pb[i] <= 0.02:
+            direction = "MUA"
+        if direction is None:
+            continue
+
+        # Gắn các tiêu chí active tại điểm này
+        crit = {}
+        crit["%BB vượt band"] = bool(pb[i] >= 0.98 or pb[i] <= 0.02)
+        crit["Test band 2-4 lần"] = bool(2 <= top_tests <= 4 or 2 <= bot_tests <= 4)
+        if direction == "BÁN":
+            crit["Stoch quá mua"] = bool(pd.notna(sk[i]) and sk[i] > 70)
+            crit["DI- > DI+"] = bool(pd.notna(dim[i]) and pd.notna(dip[i]) and dim[i] > dip[i])
+            crit["MACD < 0"] = bool(pd.notna(macd[i]) and macd[i] < 0)
+        else:
+            crit["Stoch quá bán"] = bool(pd.notna(sk[i]) and sk[i] < 30)
+            crit["DI+ > DI-"] = bool(pd.notna(dip[i]) and pd.notna(dim[i]) and dip[i] > dim[i])
+            crit["MACD > 0"] = bool(pd.notna(macd[i]) and macd[i] > 0)
+        crit["ADX > 25 (trend)"] = bool(pd.notna(adx[i]) and adx[i] > 25)
+
+        entry = closes[i]
+        exit_p = closes[min(i + hold_bars, n - 1)]
+        pips = (exit_p - entry) / pip_size if direction == "MUA" else (entry - exit_p) / pip_size
+
+        out.append({
+            "idx": idxs[i], "pos": i, "direction": direction,
+            "entry": round(float(entry), 2), "exit": round(float(exit_p), 2),
+            "pips": round(float(pips), 1),
+            "result": "ĐÚNG" if pips > 0 else "SAI",
+            "pct_b": round(float(pb[i]), 3),
+            "criteria": crit,
+        })
+        last_i = i
+
+    return out
+
+
+def evaluate_criteria(signals: list) -> dict:
+    """
+    Tính hiệu suất theo TỪNG tiêu chí: trong các lệnh có tiêu chí đó active,
+    tỉ lệ thắng và pip trung bình là bao nhiêu -> đánh giá độ tin cậy.
+
+    Trả về:
+      {
+        'overall': {win_rate, avg_pips, total, wins},
+        'by_criteria': {tên: {n, wins, win_rate, avg_pips, verdict}},
+        'recommendations': [str...],
+      }
+    """
+    out = {"overall": {}, "by_criteria": {}, "recommendations": []}
+    if not signals:
+        out["recommendations"].append("Chưa đủ lệnh để đánh giá.")
+        return out
+
+    total = len(signals)
+    wins = sum(1 for s in signals if s["result"] == "ĐÚNG")
+    avg_pips = sum(s["pips"] for s in signals) / total
+    out["overall"] = {
+        "total": total, "wins": wins,
+        "win_rate": round(wins / total * 100, 1),
+        "avg_pips": round(avg_pips, 1),
+    }
+
+    # Gom tất cả tên tiêu chí
+    all_crit = set()
+    for s in signals:
+        all_crit.update(s.get("criteria", {}).keys())
+
+    for c in sorted(all_crit):
+        sub = [s for s in signals if s.get("criteria", {}).get(c)]
+        if not sub:
+            continue
+        n = len(sub)
+        w = sum(1 for s in sub if s["result"] == "ĐÚNG")
+        ap = sum(s["pips"] for s in sub) / n
+        wr = round(w / n * 100, 1)
+        if wr >= 65 and ap > 0:
+            verdict = "🟢 Đáng tin"
+        elif wr >= 50:
+            verdict = "🟡 Trung bình"
+        else:
+            verdict = "🔴 Nên xem lại"
+        out["by_criteria"][c] = {
+            "n": n, "wins": w, "win_rate": wr,
+            "avg_pips": round(ap, 1), "verdict": verdict,
+        }
+
+    # Khuyến nghị
+    good = [c for c, v in out["by_criteria"].items() if v["win_rate"] >= 65 and v["avg_pips"] > 0]
+    bad = [c for c, v in out["by_criteria"].items() if v["win_rate"] < 50]
+    if good:
+        out["recommendations"].append(
+            "Tiêu chí ĐÁNG TIN (ưu tiên giữ): " + ", ".join(good) + ".")
+    if bad:
+        out["recommendations"].append(
+            "Tiêu chí HIỆU QUẢ THẤP (cân nhắc bỏ/lọc thêm): " + ", ".join(bad) + ".")
+    wr_all = out["overall"]["win_rate"]
+    if wr_all >= 60:
+        out["recommendations"].append(
+            f"Tổng thể tỉ lệ thắng {wr_all}% — phương pháp đang hiệu quả trên mẫu này.")
+    elif wr_all >= 50:
+        out["recommendations"].append(
+            f"Tổng thể {wr_all}% — chấp nhận được, nên kết hợp lọc xu hướng lớn.")
+    else:
+        out["recommendations"].append(
+            f"Tổng thể {wr_all}% — cần siết điều kiện vào (thêm xác nhận khung lớn).")
+    out["recommendations"].append(
+        f"Mẫu chỉ {total} lệnh — càng nhiều lệnh, đánh giá càng chính xác.")
+    return out
+
+
+# ============================================================================
+# THAM KHẢO CHỈ BÁO TRADINGVIEW: Parabolic SAR + Swing SH/SL + Ravand (MA đổi màu)
+# Tái tạo gần đúng theo tham số gốc: SAR(0.02,0.02,0.2), Swing lookback 7,
+# Ravand = SMA(20) đổi màu theo hướng dốc.
+# ============================================================================
+
+def parabolic_sar(df: pd.DataFrame, af_start: float = 0.02,
+                  af_step: float = 0.02, af_max: float = 0.2) -> pd.Series:
+    """
+    Parabolic SAR chuẩn (Welles Wilder). Trả về Series giá trị SAR mỗi nến.
+    Tham số theo chỉ báo gốc: bắt đầu 0.02, số gia 0.02, tối đa 0.2.
+    """
+    if df is None or len(df) < 5:
+        return pd.Series(dtype=float)
+    high = df["High"].values
+    low = df["Low"].values
+    n = len(df)
+    sar = np.zeros(n)
+    trend = np.zeros(n, dtype=int)  # 1 = tăng, -1 = giảm
+    af = af_start
+    # khởi tạo
+    trend[0] = 1
+    sar[0] = low[0]
+    ep = high[0]  # extreme point
+    for i in range(1, n):
+        prev_sar = sar[i-1]
+        if trend[i-1] == 1:  # đang tăng
+            sar[i] = prev_sar + af * (ep - prev_sar)
+            sar[i] = min(sar[i], low[i-1], low[max(0, i-2)])
+            if low[i] < sar[i]:
+                trend[i] = -1
+                sar[i] = ep
+                ep = low[i]
+                af = af_start
+            else:
+                trend[i] = 1
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + af_step, af_max)
+        else:  # đang giảm
+            sar[i] = prev_sar + af * (ep - prev_sar)
+            sar[i] = max(sar[i], high[i-1], high[max(0, i-2)])
+            if high[i] > sar[i]:
+                trend[i] = 1
+                sar[i] = ep
+                ep = high[i]
+                af = af_start
+            else:
+                trend[i] = -1
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + af_step, af_max)
+    return pd.Series(sar, index=df.index)
+
+
+def swing_labels(df: pd.DataFrame, lookback: int = 7) -> dict:
+    """
+    Đánh dấu Swing High (SH) / Swing Low (SL) — KHỚP logic Pine Script gốc.
+
+    Pine gốc: nến tại vị trí pivot là swing high nếu, trong khoảng start=lookback*2-1
+    nến, các nến TRƯỚC pivot đều có High < pivot (dùng >) và các nến SAU pivot đều
+    có High <= pivot (dùng >=, để xử lý 2 đỉnh bằng nhau liên tiếp). Tương tự cho low.
+    Nhãn hiện tại nến pivot (lùi 'lookback' nến so với nến xác nhận).
+
+    Trả về: {'SH': [(idx, price)...], 'SL': [(idx, price)...]}
+    """
+    out = {"SH": [], "SL": []}
+    if df is None or len(df) < lookback * 2 + 2:
+        return out
+    high = df["High"].values
+    low = df["Low"].values
+    idxs = df.index
+    n = len(df)
+    start = lookback * 2 - 1  # tổng số nến kiểm tra quanh pivot (như Pine)
+
+    # Với mỗi nến xác nhận j, pivot nằm ở j-lookback
+    for j in range(start, n):
+        piv = j - lookback  # vị trí pivot (nến giữa)
+        ph = high[piv]
+        pl = low[piv]
+        is_high = True
+        is_low = True
+        for k in range(0, start + 1):
+            pos = j - k  # duyệt từ nến mới về cũ (như Pine dùng high[i])
+            rel = pos - piv  # <0: sau pivot, >0: trước pivot (theo thời gian)
+            if pos == piv:
+                continue
+            # Swing High
+            if is_high:
+                if rel > 0:  # nến TRƯỚC pivot (cũ hơn): dùng >
+                    if high[pos] > ph:
+                        is_high = False
+                else:        # nến SAU pivot (mới hơn): dùng >=
+                    if high[pos] >= ph:
+                        is_high = False
+            # Swing Low
+            if is_low:
+                if rel > 0:
+                    if low[pos] < pl:
+                        is_low = False
+                else:
+                    if low[pos] <= pl:
+                        is_low = False
+        if is_high:
+            out["SH"].append((idxs[piv], float(ph)))
+        elif is_low:
+            out["SL"].append((idxs[piv], float(pl)))
+    return out
+
+
+def ravand_ma(df: pd.DataFrame, length: int = 20, smoothing: int = 2,
+              ma_type: str = "SMA") -> pd.DataFrame:
+    """
+    'Ravand' = đường MA đổi màu theo hướng — KHỚP logic Pine gốc.
+
+    Gốc: mặc định SMA(20). Đổi màu theo: ma_up = out[now] >= out[now-smoothe].
+    Màu: lime (xanh, dir=1) khi >= ; red (đỏ, dir=-1) khi < ; smoothe mặc định 2.
+
+    Trả về: cột 'ravand' (giá trị MA) và 'dir' (1=xanh lime, -1=đỏ).
+    """
+    out = pd.DataFrame(index=df.index)
+    if df is None or len(df) < length + smoothing + 1:
+        out["ravand"] = np.nan
+        out["dir"] = 0
+        return out
+    src = df["Close"]
+    if ma_type == "EMA":
+        ma = src.ewm(span=length, adjust=False).mean()
+    else:  # SMA mặc định (đúng gốc atype=1)
+        ma = src.rolling(length).mean()
+    # ma_up = out1 >= out1[smoothe]  (so với 'smoothing' nến trước)
+    ma_prev = ma.shift(smoothing)
+    direction = np.where(ma >= ma_prev, 1, -1)
+    out["ravand"] = ma
+    out["dir"] = direction
+    out.loc[ma.isna() | ma_prev.isna(), "dir"] = 0
+    return out
+
+
+def rsi_bands(df: pd.DataFrame, length: int = 14, ob_level: float = 70,
+              os_level: float = 30) -> pd.DataFrame:
+    """
+    RSI Bands [LazyBear] — tính NGƯỢC từ RSI ra mức GIÁ.
+    - ub (Resistance): mức giá mà tại đó RSI sẽ chạm ob_level (70)
+    - lb (Support): mức giá mà tại đó RSI sẽ chạm os_level (30)
+    - mid: trung bình ub, lb
+
+    Khớp Pine gốc:
+      ep = 2*length - 1
+      auc = ema(max(src-src[1],0), ep)
+      adc = ema(max(src[1]-src,0), ep)
+      x1 = (length-1)*(adc*ob/(100-ob) - auc)
+      ub = src+x1        nếu x1>=0
+         = src+x1*(100-ob)/ob  nếu x1<0
+      (tương tự lb với os)
+
+    Trả về DataFrame: cột 'ub', 'lb', 'mid'.
+    """
+    out = pd.DataFrame(index=df.index)
+    if df is None or len(df) < length + 2:
+        out["ub"] = np.nan; out["lb"] = np.nan; out["mid"] = np.nan
+        return out
+    src = df["Close"]
+    ep = 2 * length - 1
+    up = (src - src.shift(1)).clip(lower=0)     # max(src-src[1], 0)
+    dn = (src.shift(1) - src).clip(lower=0)     # max(src[1]-src, 0)
+    auc = up.ewm(span=ep, adjust=False).mean()
+    adc = dn.ewm(span=ep, adjust=False).mean()
+
+    x1 = (length - 1) * (adc * ob_level / (100 - ob_level) - auc)
+    ub = np.where(x1 >= 0, src + x1, src + x1 * (100 - ob_level) / ob_level)
+    x2 = (length - 1) * (adc * os_level / (100 - os_level) - auc)
+    lb = np.where(x2 >= 0, src + x2, src + x2 * (100 - os_level) / os_level)
+
+    out["ub"] = ub
+    out["lb"] = lb
+    out["mid"] = (out["ub"] + out["lb"]) / 2
+    return out
+
+
+def ripster_clouds(df: pd.DataFrame, len1_short: int = 50, len1_long: int = 55,
+                   len2_short: int = 20, len2_long: int = 21) -> pd.DataFrame:
+    """
+    Ripster MTF Clouds — 2 đám mây EMA. Khớp code gốc:
+      - Mây 1 (xanh dương): EMA(50) & EMA(55)
+      - Mây 2 (teal): EMA(20) & EMA(21)
+      - Nguồn hl2 = (High+Low)/2
+    Mây xanh (bullish) khi EMA ngắn >= EMA dài, ngược lại đỏ (bearish).
+
+    Trả về DataFrame: c1_short, c1_long, c1_bull, c2_short, c2_long, c2_bull.
+    """
+    out = pd.DataFrame(index=df.index)
+    if df is None or len(df) < max(len1_long, len2_long) + 2:
+        for c in ["c1_short", "c1_long", "c2_short", "c2_long"]:
+            out[c] = np.nan
+        out["c1_bull"] = True
+        out["c2_bull"] = True
+        return out
+    src = (df["High"] + df["Low"]) / 2  # hl2
+    out["c1_short"] = src.ewm(span=len1_short, adjust=False).mean()
+    out["c1_long"] = src.ewm(span=len1_long, adjust=False).mean()
+    out["c2_short"] = src.ewm(span=len2_short, adjust=False).mean()
+    out["c2_long"] = src.ewm(span=len2_long, adjust=False).mean()
+    out["c1_bull"] = out["c1_short"] >= out["c1_long"]
+    out["c2_bull"] = out["c2_short"] >= out["c2_long"]
     return out

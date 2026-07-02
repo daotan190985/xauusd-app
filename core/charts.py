@@ -22,7 +22,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from core.analyzer import detect_band_hold
+from core.analyzer import detect_band_hold, parabolic_sar, swing_labels, ravand_ma, rsi_bands, ripster_clouds
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,11 @@ class ChartOptions:
     adx: bool = False            # panel phụ — tắt mặc định
     macd: bool = True            # MACD là xu hướng chính -> bật
     stoch_rsi: bool = False      # panel phụ — tắt mặc định
+    psar: bool = False           # Parabolic SAR — tắt mặc định
+    swing: bool = False          # nhãn Swing SH/SL — tắt mặc định
+    ravand: bool = False         # MA đổi màu theo hướng — tắt mặc định
+    rsi_bands: bool = False       # RSI Bands (LazyBear) — tắt mặc định
+    ripster: bool = False         # Ripster MTF Clouds — tắt mặc định
     scale: str = "linear"        # linear / log / percent
     lock_scale: bool = False     # True = khóa trục Y (không auto-fit khi pan/zoom)
 
@@ -104,6 +109,11 @@ class ChartOptions:
             adx="ADX + DI" in s,
             macd="MACD" in s,
             stoch_rsi="Stochastic + RSI" in s,
+            psar="Parabolic SAR" in s,
+            swing="Swing SH/SL" in s,
+            ravand="Ravand (MA đổi màu)" in s,
+            rsi_bands="RSI Bands" in s,
+            ripster="Ripster Clouds (mây EMA)" in s,
             scale=scale,
             lock_scale=lock_scale,
         )
@@ -118,7 +128,26 @@ class ChartOptions:
 ALL_INDICATORS = [
     "EMA 100", "EMA 200", "EMA 1200", "Bollinger Bands", "Keltner Channel",
     "%B", "ADX + DI", "MACD", "Stochastic + RSI",
+    "Parabolic SAR", "Swing SH/SL", "Ravand (MA đổi màu)", "RSI Bands",
+    "Ripster Clouds (mây EMA)",
 ]
+
+# Nhóm indicator theo loại — để UI chọn cho gọn, tránh bật chồng chéo
+INDICATOR_GROUPS = {
+    "📈 Đường trung bình (MA/EMA)": [
+        "EMA 100", "EMA 200", "EMA 1200", "Ravand (MA đổi màu)",
+        "Ripster Clouds (mây EMA)",
+    ],
+    "📊 Kênh giá (Band/Channel)": [
+        "Bollinger Bands", "Keltner Channel", "RSI Bands",
+    ],
+    "🎯 Điểm & Xu hướng": [
+        "Parabolic SAR", "Swing SH/SL",
+    ],
+    "📉 Bảng phụ (dưới biểu đồ)": [
+        "%B", "ADX + DI", "MACD", "Stochastic + RSI",
+    ],
+}
 DEFAULT_INDICATORS = ["EMA 100", "EMA 200", "Bollinger Bands", "MACD"]
 
 
@@ -265,6 +294,112 @@ def build_full_chart(
                        line=dict(color=opt.col_kc, width=1, dash="dot")),
             row=1, col=1,
         )
+
+    # ---- Parabolic SAR (chấm) ----
+    if opt.psar:
+        try:
+            sar = parabolic_sar(df)
+            fig.add_trace(
+                go.Scatter(x=df.index, y=sar, name="P.SAR", mode="markers",
+                           marker=dict(size=3, color="#42a5f5"), showlegend=False),
+                row=1, col=1,
+            )
+        except Exception:
+            pass
+
+    # ---- Ravand: MA đổi màu theo hướng (lime lên / đỏ xuống) — khớp gốc ----
+    if opt.ravand:
+        try:
+            rv = ravand_ma(df)
+            up_y = rv["ravand"].where(rv["dir"] > 0)
+            down_y = rv["ravand"].where(rv["dir"] < 0)
+            fig.add_trace(
+                go.Scatter(x=df.index, y=up_y, name="Ravand↑",
+                           line=dict(color="#00e676", width=3), connectgaps=False,
+                           showlegend=False),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=down_y, name="Ravand↓",
+                           line=dict(color="#ff1744", width=3), connectgaps=False,
+                           showlegend=False),
+                row=1, col=1,
+            )
+        except Exception:
+            pass
+
+    # ---- Ripster MTF Clouds: 2 đám mây EMA (50/55 xanh dương, 20/21 teal) ----
+    if opt.ripster:
+        try:
+            rc = ripster_clouds(df)
+            # Mây 1 (xanh dương): fill giữa EMA50 & EMA55
+            fig.add_trace(
+                go.Scatter(x=df.index, y=rc["c1_short"], name="Ripster 50",
+                           line=dict(color="rgba(41,98,255,0.7)", width=1),
+                           showlegend=False),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=rc["c1_long"], name="Ripster 55",
+                           line=dict(color="rgba(41,98,255,0.7)", width=1),
+                           fill="tonexty", fillcolor="rgba(41,98,255,0.12)",
+                           showlegend=False),
+                row=1, col=1,
+            )
+            # Mây 2 (teal): fill giữa EMA20 & EMA21
+            fig.add_trace(
+                go.Scatter(x=df.index, y=rc["c2_short"], name="Ripster 20",
+                           line=dict(color="rgba(0,150,136,0.7)", width=1),
+                           showlegend=False),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=rc["c2_long"], name="Ripster 21",
+                           line=dict(color="rgba(0,150,136,0.7)", width=1),
+                           fill="tonexty", fillcolor="rgba(0,150,136,0.18)",
+                           showlegend=False),
+                row=1, col=1,
+            )
+        except Exception:
+            pass
+
+    # ---- RSI Bands [LazyBear]: kháng cự/hỗ trợ theo RSI ----
+    if opt.rsi_bands:
+        try:
+            rb = rsi_bands(df)
+            fig.add_trace(
+                go.Scatter(x=df.index, y=rb["ub"], name="RSI Kháng cự",
+                           line=dict(color="#ef5350", width=2), showlegend=False),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=rb["lb"], name="RSI Hỗ trợ",
+                           line=dict(color="#26a69a", width=2), showlegend=False),
+                row=1, col=1,
+            )
+            fig.add_trace(
+                go.Scatter(x=df.index, y=rb["mid"], name="RSI Mid",
+                           line=dict(color="gray", width=1, dash="dot"),
+                           showlegend=False),
+                row=1, col=1,
+            )
+        except Exception:
+            pass
+
+    # ---- Swing High/Low (mũi tên + nhãn SH/SL) — khớp gốc ----
+    if opt.swing:
+        try:
+            sw = swing_labels(df, lookback=7)
+            for ts, pr in sw["SH"]:
+                fig.add_annotation(x=ts, y=pr, text="SH ▼", showarrow=False,
+                                   yshift=13, font=dict(size=10, color="#ff1744"),
+                                   row=1, col=1)
+            for ts, pr in sw["SL"]:
+                fig.add_annotation(x=ts, y=pr, text="SL ▲", showarrow=False,
+                                   yshift=-13, font=dict(size=10, color="#00e676"),
+                                   row=1, col=1)
+        except Exception:
+            pass
 
     # ---- PANEL %B ----
     if "pctb" in row_of and "PCT_B" in df:

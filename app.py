@@ -30,6 +30,8 @@ from core.analyzer import (
     compute_reversal_zones,
     count_band_tests,
     backtest_recent_signals,
+    backtest_with_criteria,
+    evaluate_criteria,
     check_big_frame_resistance,
     detect_outside_band_streak,
     detect_pullback_zone,
@@ -46,6 +48,7 @@ from core.analyzer import (
 )
 from core.charts import (
     ALL_INDICATORS,
+    INDICATOR_GROUPS,
     DEFAULT_INDICATORS,
     PLOTLY_CONFIG,
     ChartOptions,
@@ -73,9 +76,11 @@ from core.journal import (
     ensure_dirs,
     filter_by_period,
     load_history,
+    load_method_reports,
     method_performance,
     parse_methods,
     save_historical_chart,
+    save_method_report,
     save_trade,
     save_uploaded_image,
 )
@@ -310,11 +315,26 @@ def indicator_controls(key_prefix: str, colors: Optional[dict] = None) -> ChartO
     colors: dict màu tùy chỉnh từ indicator_settings_panel (nếu có).
     """
     with st.expander("🎛️ Hiển thị chỉ báo & Scale", expanded=False):
-        selected = st.multiselect(
-            "Bật/tắt chỉ báo (mặc định gọn để dễ xem)",
-            ALL_INDICATORS, default=DEFAULT_INDICATORS,
-            key=f"{key_prefix}_inds",
-        )
+        st.caption("Chọn theo nhóm cho gọn — mỗi nhóm 1 loại. "
+                   "Nên bật 3-4 chỉ báo mỗi lần để biểu đồ sạch, dễ đọc.")
+        selected = []
+        for group_name, items in INDICATOR_GROUPS.items():
+            # mặc định: chỉ bật những cái nằm trong DEFAULT_INDICATORS
+            defaults = [x for x in items if x in DEFAULT_INDICATORS]
+            picked = st.multiselect(
+                group_name, items, default=defaults,
+                key=f"{key_prefix}_grp_{group_name}",
+            )
+            selected.extend(picked)
+
+        # Cảnh báo nếu bật quá nhiều đường trên biểu đồ giá (dễ rối)
+        price_overlays = [x for x in selected if x in (
+            INDICATOR_GROUPS["📈 Đường trung bình (MA/EMA)"] +
+            INDICATOR_GROUPS["📊 Kênh giá (Band/Channel)"])]
+        if len(price_overlays) > 5:
+            st.warning(f"⚠️ Đang bật {len(price_overlays)} đường trên biểu đồ giá — "
+                       f"có thể rối. Nên bớt xuống 3-4 cái cho dễ nhìn.")
+
         scale_label = st.radio(
             "Scale giá", ["Linear", "Log", "Phần trăm"],
             horizontal=True, key=f"{key_prefix}_scale",
@@ -618,6 +638,102 @@ def _render_reversal_section(ticker: str, pkey: tuple, fb: str = None,
                        "không phải kết quả giao dịch thật.")
         else:
             st.info("Chưa tìm thấy mô hình vào lệnh nào trong lịch sử gần đây.")
+
+    st.divider()
+    # ===== BÁO CÁO ĐÁNH GIÁ ĐỘ TIN CẬY PHƯƠNG PHÁP (10 lệnh) =====
+    st.markdown("##### 📊 Báo cáo đánh giá phương pháp (10 lệnh gần nhất)")
+    st.caption("Quét lịch sử, kiểm tra TẤT CẢ tiêu chí, đánh giá độ tin cậy + "
+               "khuyến nghị. Chỉ chạy khi bấm nút (không ảnh hưởng tốc độ phân tích).")
+    rp1, rp2 = st.columns([1, 1])
+    with rp1:
+        rep_tf = st.selectbox("Khung báo cáo", ["5m", "15m", "30m", "60m"],
+                              index=0, key="rep_tf")
+    with rp2:
+        st.write("")
+        st.write("")
+        gen_report = st.button("📊 Tạo báo cáo đánh giá", key="btn_report",
+                               use_container_width=True)
+
+    if gen_report:
+        df_rep = frames3.get(rep_tf)
+        if df_rep is None or df_rep.empty:
+            st.warning("Không có dữ liệu khung này.")
+        else:
+            sym_cfg = get_symbol_config(st.session_state.get("cur_symbol", ""))
+            psize = sym_cfg.get("pip", 0.1) if sym_cfg else 0.1
+            sigs = backtest_with_criteria(df_rep, pip_size=psize, max_signals=10)
+            ev = evaluate_criteria(sigs)
+            # Lưu lịch sử báo cáo (nhẹ, chỉ số liệu — không lưu ảnh)
+            import datetime as _dtmod
+            report_rec = {
+                "created_at": _dtmod.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "symbol": st.session_state.get("cur_symbol", "XAU/USD"),
+                "tf": rep_tf,
+                "overall": ev["overall"],
+                "by_criteria": ev["by_criteria"],
+                "recommendations": ev["recommendations"],
+                "n_signals": len(sigs),
+            }
+            save_method_report(report_rec)
+            st.session_state["_last_report"] = report_rec
+            st.session_state["_last_report_sigs"] = sigs
+            st.session_state["_last_report_df_tf"] = rep_tf
+
+    # Hiển thị báo cáo gần nhất (nếu có)
+    rep = st.session_state.get("_last_report")
+    if rep and rep.get("tf") == rep_tf:
+        ov = rep["overall"]
+        if ov:
+            cobg = "#1a3a2a" if ov["win_rate"] >= 55 else "#3a2016"
+            cobd = "#089981" if ov["win_rate"] >= 55 else "#F23645"
+            st.markdown(
+                f"<div style='background:{cobg};border:2px solid {cobd};"
+                f"padding:14px;border-radius:11px;margin:8px 0'>"
+                f"<b style='font-size:1.1em'>📊 Tổng thể ({rep['symbol']} · {rep['tf']})</b><br>"
+                f"Tỉ lệ thắng: <b>{ov['win_rate']}%</b> ({ov['wins']}/{ov['total']} lệnh) · "
+                f"Pip TB: <b>{ov['avg_pips']:+.0f}</b> · giữ ~6 nến</div>",
+                unsafe_allow_html=True)
+        # Bảng theo tiêu chí
+        if rep["by_criteria"]:
+            st.markdown("**Đánh giá theo từng tiêu chí:**")
+            import pandas as _pd
+            rows = [{"Tiêu chí": c, "Số lệnh": v["n"], "Thắng %": v["win_rate"],
+                     "Pip TB": v["avg_pips"], "Đánh giá": v["verdict"]}
+                    for c, v in rep["by_criteria"].items()]
+            st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        # Khuyến nghị
+        if rep["recommendations"]:
+            st.markdown("**💡 Khuyến nghị:**")
+            for r in rep["recommendations"]:
+                st.markdown(f"- {r}")
+        # Biểu đồ chứng minh (điểm vào + thời gian) — Plotly nhẹ, không render ảnh
+        sigs = st.session_state.get("_last_report_sigs", [])
+        if sigs:
+            with st.expander("📈 Biểu đồ chứng minh 10 lệnh (có thời gian)", expanded=False):
+                df_rep = frames3.get(rep_tf)
+                if df_rep is not None and not df_rep.empty:
+                    opt_r = ChartOptions.from_selection(["EMA 200", "%B"])
+                    fig_r = build_full_chart(
+                        df_rep, title=f"{rep['symbol']} — {rep_tf} (10 lệnh đánh giá)",
+                        options=opt_r, height=500)
+                    if fig_r:
+                        add_backtest_markers(fig_r, df_rep, sigs)
+                        st.plotly_chart(fig_r, use_container_width=True, config=PLOTLY_CONFIG)
+                # Bảng chi tiết từng lệnh + thời gian rõ ràng
+                st.markdown("**Chi tiết từng lệnh (thời gian rõ ràng):**")
+                rows = [{"Thời gian": s["idx"].strftime("%d/%m %H:%M"),
+                         "Hướng": s["direction"], "Vào": s["entry"], "Ra": s["exit"],
+                         "Pip": s["pips"], "KQ": s["result"]} for s in sigs]
+                st.dataframe(_pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        # Xem lại báo cáo đã lưu
+        saved = load_method_reports()
+        if len(saved) > 1:
+            with st.expander(f"🗂️ Lịch sử báo cáo đã lưu ({len(saved)})", expanded=False):
+                for r in saved[:15]:
+                    ov2 = r.get("overall", {})
+                    st.markdown(f"- **{r.get('created_at')}** · {r.get('symbol')} "
+                                f"{r.get('tf')} · thắng {ov2.get('win_rate','?')}% "
+                                f"({ov2.get('total','?')} lệnh)")
 
     st.divider()
     st.markdown("##### ⚡ Scalp theo EMA1200 khung lớn")
